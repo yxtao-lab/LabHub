@@ -1,0 +1,14 @@
+node_modules/
+dist/
+data/
+projects/*
+!projects/.gitkeep
+.env
+.env.local
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+*.log
+client/dist/
+server/dist/

@@ -3,6 +3,7 @@ import { ensureMissingAnalyses } from './analysis-generate.js';
 import { getCloudUrl } from './auth-store.js';
 import { getDeepSeekConfig } from './analysis-deepseek.js';
 import { loadRootEnvFile } from './load-env.js';
+import { ensureComprehensiveProfiles } from './projects-service.js';
 import { clearAllRuntimes } from './runtime-store.js';
 import { ensureDirs, loadProjects } from './store.js';
 
@@ -30,6 +31,10 @@ try {
 } catch (error) {
   console.warn('[labhub] 自动生成分析总结失败', error);
 }
+
+void ensureComprehensiveProfiles().catch((error) => {
+  console.warn('[labhub] 补全启动/构建模式失败', error);
+});
 
 const port = Number(process.env.PORT ?? 8790);
 const app = createApp();

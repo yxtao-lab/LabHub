@@ -12,6 +12,7 @@ import {
   listProjectViews,
   startProject,
   stopProject,
+  syncProfilesFromPackage,
   syncProject,
   toProjectView,
   updateProject,
@@ -208,6 +209,18 @@ projectsRouter.post('/:id/build', async (req, res, next) => {
 projectsRouter.post('/:id/sync', async (req, res, next) => {
   try {
     const project = await syncProject(req.params.id);
+    res.json({ project });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/projects/:id/sync-profiles — 从 package.json 同步启动/构建模式
+ */
+projectsRouter.post('/:id/sync-profiles', async (req, res, next) => {
+  try {
+    const project = await syncProfilesFromPackage(req.params.id);
     res.json({ project });
   } catch (error) {
     next(error);

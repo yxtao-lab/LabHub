@@ -13,6 +13,7 @@ import {
 type DetailTab = 'logs' | 'analysis';
 type UpgradeReason = 'project' | 'ai' | 'general';
 type BillingCycle = 'monthly' | 'yearly';
+type LegalDocKind = 'terms' | 'privacy';
 
 type PlanFeature = {
   key: string;
@@ -89,12 +90,15 @@ const error = ref<string | null>(null);
 const busy = ref(false);
 const showAdd = ref(false);
 const showUpgrade = ref(false);
+const legalDoc = ref<LegalDocKind | null>(null);
 const upgradeReason = ref<UpgradeReason>('general');
 const billingCatalog = ref<BillingCatalog | null>(null);
 const billingCycle = ref<BillingCycle>('monthly');
 const selectedPlanId = ref('basic');
 const billingBusy = ref(false);
 const billingMessage = ref<string | null>(null);
+const toastMessage = ref<string | null>(null);
+let toastTimer: number | undefined;
 /** 开发环境预填的 Cloud 测试账号（与 services/cloud 启动种子一致） */
 const DEV_TEST_PHONE = '13800138000';
 const DEV_TEST_PASSWORD = 'labhub123';
@@ -330,6 +334,85 @@ const aiAtLimit = computed(() => {
   const quota = authUser.value?.aiQuota;
   return Boolean(quota && quota.remaining <= 0);
 });
+
+const planSummary = computed(() => {
+  const user = authUser.value;
+  if (!user) {
+    return '';
+  }
+  const name = user.planName || '免费版';
+  const expire = user.planExpiresAt ? ` · 至 ${user.planExpiresAt.slice(0, 10)}` : '';
+  return `${name}${expire}`;
+});
+
+/**
+ * 展示短暂提示。
+ *
+ * @param message - 文案
+ * @returns {void}
+ */
+function showToast(message: string): void {
+  toastMessage.value = message;
+  if (toastTimer !== undefined) {
+    window.clearTimeout(toastTimer);
+  }
+  toastTimer = window.setTimeout(() => {
+    toastMessage.value = null;
+    toastTimer = undefined;
+  }, 2200);
+}
+
+/**
+ * 复制文本到剪贴板。
+ *
+ * @param text - 文本
+ * @returns 是否成功
+ */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const input = document.createElement('textarea');
+      input.value = text;
+      input.style.position = 'fixed';
+      input.style.left = '-9999px';
+      document.body.appendChild(input);
+      input.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(input);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/**
+ * 复制当前用户邀请码。
+ *
+ * @returns {Promise<void>}
+ */
+async function copyInviteCode(): Promise<void> {
+  const code = authUser.value?.inviteCode?.trim();
+  if (!code) {
+    showToast('暂无邀请码');
+    return;
+  }
+  const ok = await copyText(code);
+  showToast(ok ? `邀请码已复制：${code}` : '复制失败，请手动选择');
+}
+
+/**
+ * 打开法律文档弹窗。
+ *
+ * @param kind - 条款或隐私
+ * @returns {void}
+ */
+function openLegalDoc(kind: LegalDocKind): void {
+  legalDoc.value = kind;
+}
 
 /**
  * 拉取套餐目录。
@@ -1008,6 +1091,21 @@ async function syncSelected(): Promise<void> {
 }
 
 /**
+ * 从 package.json 同步启动 / 构建模式到清单。
+ *
+ * @returns {Promise<void>}
+ */
+async function syncSelectedProfiles(): Promise<void> {
+  if (!selected.value) {
+    return;
+  }
+  const id = selected.value.id;
+  await runAction(async () => {
+    await api(`/api/projects/${id}/sync-profiles`, { method: 'POST' });
+  });
+}
+
+/**
  * 从清单移除选中项目（默认不删磁盘）。
  *
  * @returns {Promise<void>}
@@ -1204,6 +1302,9 @@ onUnmounted(() => {
   if (smsTimer !== undefined) {
     window.clearInterval(smsTimer);
   }
+  if (toastTimer !== undefined) {
+    window.clearTimeout(toastTimer);
+  }
 });
 
 watch(
@@ -1390,11 +1491,19 @@ watch(logProfileId, () => {
           <input v-model="authAgreed" type="checkbox" class="mt-0.5 accent-[var(--accent)]" />
           <span>
             我已阅读并同意
-            <button type="button" class="text-[var(--text)]/80 hover:underline" @click.prevent>
+            <button
+              type="button"
+              class="text-[var(--accent)] hover:underline"
+              @click.prevent="openLegalDoc('terms')"
+            >
               服务条款
             </button>
             和
-            <button type="button" class="text-[var(--text)]/80 hover:underline" @click.prevent>
+            <button
+              type="button"
+              class="text-[var(--accent)] hover:underline"
+              @click.prevent="openLegalDoc('privacy')"
+            >
               隐私协议
             </button>
           </span>
@@ -1443,16 +1552,18 @@ watch(logProfileId, () => {
           class="flex flex-wrap items-center gap-2 rounded-md border border-[var(--line)] bg-[#0b1016]/60 px-3 py-1.5 text-xs"
         >
           <span>{{ authUser.phoneMasked }}</span>
-          <span
-            v-if="authUser.planName"
-            class="rounded border border-[var(--line)] px-1.5 py-0.5 text-[var(--accent)]"
+          <button
+            type="button"
+            class="rounded border border-[var(--accent)]/40 px-1.5 py-0.5 text-[var(--accent)] hover:bg-[var(--accent)]/10"
+            :title="authUser.planExpiresAt ? `到期 ${authUser.planExpiresAt.slice(0, 10)}` : '当前套餐'"
+            @click="openUpgrade('general')"
           >
-            {{ authUser.planName }}
-          </span>
+            {{ planSummary }}
+          </button>
           <span
             v-if="authUser.projectLimit != null"
             class="text-[var(--muted)]"
-            :title="authUser.inviteCode ? `我的邀请码 ${authUser.inviteCode}` : ''"
+            :class="projectAtLimit ? 'text-[var(--danger)]' : ''"
           >
             项目 {{ authUser.projectCount ?? projects.length }}/{{ authUser.projectLimit }}
           </span>
@@ -1463,6 +1574,15 @@ watch(logProfileId, () => {
           >
             AI {{ authUser.aiQuota.remaining }}/{{ authUser.aiQuota.limit }}
           </span>
+          <button
+            v-if="authUser.inviteCode"
+            type="button"
+            class="rounded border border-[var(--line)] px-2 py-0.5 text-[var(--muted)] hover:border-[var(--accent)]/40 hover:text-[var(--text)]"
+            :title="`邀请码 ${authUser.inviteCode}（点击复制）`"
+            @click="copyInviteCode"
+          >
+            邀请码
+          </button>
           <button
             type="button"
             class="rounded border border-[var(--accent)]/50 px-2 py-0.5 text-[var(--accent)] hover:bg-[var(--accent)]/10"
@@ -1800,6 +1920,18 @@ watch(logProfileId, () => {
                   {{ selected.absolutePath }}
                 </p>
                 <p
+                  v-if="!detailMetaCollapsed && selected.repoUrl"
+                  class="mt-0.5 break-all text-xs text-[var(--muted)]"
+                >
+                  远程仓库
+                  <a
+                    class="mono text-[var(--accent)] hover:underline"
+                    :href="selected.repoUrl"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >{{ selected.repoUrl }}</a>
+                </p>
+                <p
                   v-else
                   class="mt-1 text-[11px] text-[var(--muted)]"
                 >
@@ -1930,7 +2062,19 @@ watch(logProfileId, () => {
               <div class="mt-3 space-y-2">
                 <div class="flex items-center justify-between gap-2">
                   <span class="text-xs text-[var(--muted)]">启动模式（可并行）</span>
-                  <span class="mono text-[11px] text-[var(--muted)]">{{ selected.installCommand }}</span>
+                  <div class="flex items-center gap-2">
+                    <button
+                      type="button"
+                      :disabled="busy || !selected.exists"
+                      class="rounded border px-2 py-0.5 text-[11px] font-medium disabled:opacity-40"
+                      :class="toneClass()"
+                      title="从 package.json 或 Python 清单同步启动/构建模式"
+                      @click="syncSelectedProfiles"
+                    >
+                      从脚本同步
+                    </button>
+                    <span class="mono text-[11px] text-[var(--muted)]">{{ selected.installCommand }}</span>
+                  </div>
                 </div>
                 <div
                   v-for="item in selected.profileRuntimes"
@@ -2336,13 +2480,22 @@ watch(logProfileId, () => {
           </button>
         </div>
 
-        <p
+        <div
           v-if="authUser?.inviteCode"
-          class="mt-3 text-[11px] text-[var(--muted)]"
+          class="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-[var(--muted)]"
         >
-          邀请好友注册双方项目额度各 +1（不替代付费）。我的邀请码：
-          <span class="mono text-[var(--text)]">{{ authUser.inviteCode }}</span>
-        </p>
+          <span>
+            邀请好友注册双方项目额度各 +1（不替代付费）。我的邀请码：
+            <span class="mono text-[var(--text)]">{{ authUser.inviteCode }}</span>
+          </span>
+          <button
+            type="button"
+            class="rounded border border-[var(--line)] px-2 py-0.5 hover:border-[var(--accent)]/40 hover:text-[var(--text)]"
+            @click="copyInviteCode"
+          >
+            复制
+          </button>
+        </div>
 
         <p v-if="billingMessage" class="mt-3 text-xs" :class="billingMessage.includes('成功') || billingMessage.includes('已切换') ? 'text-[var(--accent)]' : 'text-[var(--danger)]'">
           {{ billingMessage }}
@@ -2494,5 +2647,55 @@ watch(logProfileId, () => {
       </form>
     </div>
     </template>
+
+    <div
+      v-if="legalDoc"
+      class="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4"
+      @click.self="legalDoc = null"
+    >
+      <div class="max-h-[85vh] w-full max-w-2xl overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--panel)] shadow-2xl">
+        <div class="flex items-center justify-between border-b border-[var(--line)] px-5 py-3">
+          <h3 class="text-base font-medium">
+            {{ legalDoc === 'terms' ? 'LabHub 服务条款' : 'LabHub 隐私协议' }}
+          </h3>
+          <button
+            type="button"
+            class="text-sm text-[var(--muted)] hover:text-[var(--text)]"
+            @click="legalDoc = null"
+          >
+            关闭
+          </button>
+        </div>
+        <div class="max-h-[calc(85vh-3.5rem)] space-y-3 overflow-y-auto px-5 py-4 text-sm leading-6 text-[var(--muted)]">
+          <template v-if="legalDoc === 'terms'">
+            <p class="text-[var(--text)]">生效说明：使用 LabHub 本机控制台及关联的 LabHub Cloud 服务，即表示你同意本条款。</p>
+            <p>1. 服务内容：LabHub 提供本机多仓库登记、启停与日志查看；Cloud 提供账号、清单同步、套餐额度与（可选）AI 分析中继。</p>
+            <p>2. 账号责任：你应妥善保管手机号与登录凭证；因凭证泄露导致的损失由你自行承担。</p>
+            <p>3. 合理使用：不得利用本服务从事违法违规活动，不得攻击、滥用短信、AI 或接口配额。</p>
+            <p>4. 本地与云端：业务代码默认保存在你的本机目录；云端主要保存账号、套餐与项目清单元数据，不代替你的 Git 远程托管。</p>
+            <p>5. 套餐与费用：免费档与付费档权限以产品内展示为准；付费开通以订单与支付结果为准（当前可先使用模拟支付联调）。</p>
+            <p>6. 免：本软件按「现状」提供；在法律允许范围内，我们对间接损失、数据丢失不作额外担保。请自行备份重要代码与配置。</p>
+            <p>7. 变更：我们可能更新条款；重大变更将通过产品内提示。继续使用视为接受更新。</p>
+          </template>
+          <template v-else>
+            <p class="text-[var(--text)]">我们重视你的隐私。本协议说明 LabHub / LabHub Cloud 如何处理相关信息。</p>
+            <p>1. 收集范围：手机号、登录凭证摘要、邀请关系、项目清单元数据（如仓库地址、启停命令、标签）、套餐与 AI 用量、必要的设备/网络日志（如短信限流用 IP）。</p>
+            <p>2. 不收集：默认不上传你仓库内的源代码到 Cloud；AI 分析仅在你触发且已登录、有配额时，按产品设计发送必要上下文。</p>
+            <p>3. 用途：用于账号鉴权、清单同步、套餐与配额、安全风控、改进服务质量。</p>
+            <p>4. 存储：本机登录态保存在本地；Cloud 数据保存在你部署的服务端数据库中。请自行保护服务器与密钥。</p>
+            <p>5. 共享：未经你同意，不向无关第三方出售个人信息；仅为完成短信、支付等必要能力时，向相应服务商提供最少信息。</p>
+            <p>6. 你的权利：可申请查阅、更正或注销账号相关数据（需按运营方流程核实身份）。</p>
+            <p>7. 联系：隐私相关问题可通过产品内公示的联系方式与运营方沟通。</p>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="toastMessage"
+      class="pointer-events-none fixed bottom-6 left-1/2 z-[70] -translate-x-1/2 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-4 py-2 text-sm text-[var(--text)] shadow-xl"
+    >
+      {{ toastMessage }}
+    </div>
   </div>
 </template>

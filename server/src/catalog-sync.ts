@@ -5,6 +5,7 @@ import { toCatalogProject, cloudPutCatalog } from './cloud-client.js';
 import { getAuthToken } from './auth-store.js';
 import { cloneRepository } from './git.js';
 import { normalizeProjectRecord } from './profiles.js';
+import { refreshRecordProfiles } from './package-profiles.js';
 import {
   findProject,
   loadProjects,
@@ -18,6 +19,7 @@ import type { ProjectRecord, ProjectView } from './types.js';
 
 /**
  * 用云端清单覆盖本机 projects.json（path 统一为 projects/<id>）。
+ * 覆盖后会按本地 package.json 补全启动/构建模式。
  *
  * @param catalog - 云端项目列表
  * @returns 写入后的本机记录
@@ -49,8 +51,12 @@ export async function syncLocalCatalogFromCloud(
       currentPhase: item.currentPhase,
     }),
   );
-  saveProjects(next);
-  return next;
+  const enriched = next.map((record) => {
+    const root = resolveProjectPath(record.path);
+    return refreshRecordProfiles(record, root) ?? record;
+  });
+  saveProjects(enriched);
+  return enriched;
 }
 
 /**
@@ -107,8 +113,9 @@ export async function restoreProjectFromCatalog(
     shallow: true,
     upstreamUrl: next.upstreamUrl,
   });
-  upsertProject(next);
-  return toProjectView(next);
+  const withProfiles = refreshRecordProfiles(next, absolutePath) ?? next;
+  upsertProject(withProfiles);
+  return toProjectView(withProfiles);
 }
 
 /**

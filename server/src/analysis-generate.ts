@@ -318,7 +318,7 @@ export function buildAnalysisMarkdown(record: ProjectRecord): string {
 | 版本线索 | ${pkg?.version ?? '未知'} |
 | LabHub 标签 | ${tagLine} |
 | 默认分支 | ${record.branch} |
-| 源仓库 | ${record.repoUrl} |
+| 远程仓库 | ${record.repoUrl} |
 
 ### 2.1 目标与范围
 
@@ -436,6 +436,37 @@ ${scriptRows || '| （无 scripts） | — |'}
 }
 
 /**
+ * 确保「项目概览」含远程仓库地址（模型漏写时按 LabHub 登记补全）。
+ *
+ * @param markdown - 原始 Markdown
+ * @param repoUrl - LabHub 登记的远程地址
+ * @returns 补全后的 Markdown
+ */
+function ensureRemoteRepoInOverview(markdown: string, repoUrl: string): string {
+  const url = repoUrl.trim();
+  if (!url) {
+    return markdown;
+  }
+  if (/\| 远程仓库 \|/.test(markdown)) {
+    return markdown;
+  }
+  if (/\| 源仓库 \|/.test(markdown)) {
+    return markdown.replace(/\| 源仓库 \|/, '| 远程仓库 |');
+  }
+  const afterPackageManager = markdown.replace(
+    /(\| 包管理器 \|[^\n]*\n)/,
+    `$1| 远程仓库 | ${url} |\n`,
+  );
+  if (afterPackageManager !== markdown) {
+    return afterPackageManager;
+  }
+  return markdown.replace(
+    /(## 2\.\s*项目概览\s*\n\s*\| 项 \| 内容 \|\s*\n\|[-| ]+\|\s*\n)/,
+    `$1| 远程仓库 | ${url} |\n`,
+  );
+}
+
+/**
  * 将分析 Markdown 写入约定路径（创建 docs/）。
  *
  * @param record - 项目登记
@@ -444,8 +475,9 @@ ${scriptRows || '| （无 scripts） | — |'}
  */
 export function writeAnalysisFile(record: ProjectRecord, markdown: string): ProjectAnalysis {
   const absolutePath = resolveAnalysisPath(record.path);
+  const body = ensureRemoteRepoInOverview(markdown, record.repoUrl);
   fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
-  fs.writeFileSync(absolutePath, markdown, 'utf8');
+  fs.writeFileSync(absolutePath, body, 'utf8');
   return readProjectAnalysis(record.path);
 }
 

@@ -32,6 +32,7 @@ import {
   resolveStartProfiles,
   runtimeKey,
 } from './profiles.js';
+import { inferProjectProfiles, refreshRecordProfiles } from './package-profiles.js';
 import {
   findProject,
   loadProjects,
@@ -250,13 +251,37 @@ export async function toProjectView(record: ProjectRecord): Promise<ProjectView>
 }
 
 /**
- * 列出全部项目视图。
+ * 列出全部项目视图；顺带把不完整的启动/构建模式从 package.json 补全。
  *
  * @returns 项目视图数组
  */
 export async function listProjectViews(): Promise<ProjectView[]> {
+  await ensureComprehensiveProfiles();
   const projects = loadProjects();
   return Promise.all(projects.map((item) => toProjectView(item)));
+}
+
+/**
+ * 为清单内全部项目补全启动 / 构建模式（相对 package.json 全面）。
+ *
+ * @returns 已更新的项目 id 列表
+ */
+export async function ensureComprehensiveProfiles(): Promise<string[]> {
+  const updated: string[] = [];
+  for (const record of loadProjects()) {
+    const root = resolveProjectPath(record.path);
+    const next = refreshRecordProfiles(record, root);
+    if (!next) {
+      continue;
+    }
+    upsertProject(normalizeProjectRecord(next));
+    updated.push(record.id);
+  }
+  if (updated.length > 0) {
+    await pushCatalogIfLoggedIn();
+    console.log(`[labhub] 已补全启动/构建模式：${updated.join(', ')}`);
+  }
+  return updated;
 }
 
 /**
@@ -311,10 +336,40 @@ export async function addProject(
     });
   }
 
-  if (!input.skipInstall && input.installCommand) {
-    const pkg = path.join(absolutePath, 'package.json');
-    if (fs.existsSync(pkg)) {
-      await runShell(input.installCommand, absolutePath);
+  const inferred = inferProjectProfiles(absolutePath, {
+    openUrl: input.openUrl ?? null,
+    previous: {
+      id,
+      name: input.name ?? id,
+      repoUrl: input.repoUrl,
+      branch: input.branch,
+      path: relativePath,
+      startCommand: input.startCommand,
+      installCommand: input.installCommand,
+      openUrl: input.openUrl ?? null,
+      upstreamUrl: input.upstreamUrl ?? null,
+      tags: normalizeTags(input.tags),
+      createdAt: now,
+      updatedAt: now,
+      notes: input.notes ?? '',
+      startProfiles: input.startProfiles,
+      buildProfiles: input.buildProfiles,
+      defaultProfileId: input.defaultProfileId ?? null,
+      defaultBuildProfileId: input.defaultBuildProfileId ?? null,
+    },
+  });
+
+  const userInstall = (input.installCommand || '').trim();
+  const installCommand =
+    !userInstall ||
+    (inferred.kind === 'python' && /^npm install$/i.test(userInstall)) ||
+    (inferred.kind === 'node' && /^npm install$/i.test(userInstall) && inferred.installCommand !== userInstall)
+      ? inferred.installCommand
+      : userInstall || inferred.installCommand;
+
+  if (!input.skipInstall && installCommand) {
+    if (inferred.kind === 'node' || inferred.kind === 'python') {
+      await runShell(installCommand, absolutePath);
     }
   }
 
@@ -324,18 +379,18 @@ export async function addProject(
     repoUrl: input.repoUrl,
     branch: input.branch,
     path: relativePath,
-    startCommand: input.startCommand,
-    installCommand: input.installCommand,
+    startCommand: inferred.startCommand,
+    installCommand,
     openUrl: input.openUrl ?? null,
     upstreamUrl: input.upstreamUrl ?? null,
     tags: normalizeTags(input.tags),
     createdAt: now,
     updatedAt: now,
     notes: input.notes ?? '',
-    startProfiles: input.startProfiles,
-    defaultProfileId: input.defaultProfileId ?? null,
-    buildProfiles: input.buildProfiles,
-    defaultBuildProfileId: input.defaultBuildProfileId ?? null,
+    startProfiles: inferred.startProfiles,
+    defaultProfileId: inferred.defaultProfileId,
+    buildProfiles: inferred.buildProfiles,
+    defaultBuildProfileId: inferred.defaultBuildProfileId,
     phases: input.phases,
     currentPhase: input.currentPhase ?? null,
   });
@@ -369,6 +424,44 @@ export async function updateProject(
     ...current,
     ...patch,
     tags: patch.tags !== undefined ? normalizeTags(patch.tags) : normalizeTags(current.tags),
+    updatedAt: new Date().toISOString(),
+  });
+  upsertProject(next);
+  await pushCatalogIfLoggedIn();
+  return toProjectView(next);
+}
+
+/**
+ * 从仓库清单（package.json / Python）同步启动 / 构建模式。
+ *
+ * @param id - 项目 id
+ * @returns 更新后视图
+ * @throws {Error} 项目不存在或目录缺失
+ */
+export async function syncProfilesFromPackage(id: string): Promise<ProjectView> {
+  const current = findProject(id);
+  if (!current) {
+    throw new Error(`项目不存在：${id}`);
+  }
+  const absolutePath = resolveProjectPath(current.path);
+  if (!fs.existsSync(absolutePath)) {
+    throw new Error(`项目目录不存在：${absolutePath}`);
+  }
+  const inferred = inferProjectProfiles(absolutePath, {
+    previous: current,
+    openUrl: current.openUrl,
+  });
+  const next = normalizeProjectRecord({
+    ...current,
+    startCommand: inferred.startCommand,
+    installCommand:
+      current.installCommand && !/^npm install$/i.test(current.installCommand)
+        ? current.installCommand
+        : inferred.installCommand,
+    startProfiles: inferred.startProfiles,
+    buildProfiles: inferred.buildProfiles,
+    defaultProfileId: inferred.defaultProfileId,
+    defaultBuildProfileId: inferred.defaultBuildProfileId,
     updatedAt: new Date().toISOString(),
   });
   upsertProject(next);

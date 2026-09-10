@@ -75,6 +75,7 @@ ${ANALYSIS_SKILL_OUTPUT_TEMPLATE}
 ## 填写注意
 - 项目显示名优先用登记 name：${project.name}（id=\`${project.id}\`）
 - 分析根可用登记 path：\`${project.path.replace(/\\/g, '/')}\`
+- 「项目概览」必须含「远程仓库」行，优先填：\`${project.repoUrl ?? '未知'}\`
 - 生成日期用今天的 UTC 日期
 - 只输出最终 Markdown 文档正文
 - 文档说明中可写：由 LabHub 分析中继（DeepSeek）按 project-analysis-summary skill 在首次托管时生成

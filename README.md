@@ -62,6 +62,8 @@ npm run dev   # 默认 :8780
 
 本地联调默认已是 `http://127.0.0.1:8780`。套餐在控制台「套餐」内系统支付开通（免费 / 基础 ¥9.9 / 专业 ¥29；Cloud `PAYMENT_MODE=mock` 为模拟支付）。详见 [`services/cloud/README.md`](services/cloud/README.md)。
 
+获客材料（落地页 / 演示脚本 / 发帖文案）见 [`docs/获客/`](docs/获客/)。
+
 | 角色 | Token / 密钥 |
 |------|----------------|
 | 普通用户 | 无 DeepSeek Token；须手机号登录；邀请码可选 |

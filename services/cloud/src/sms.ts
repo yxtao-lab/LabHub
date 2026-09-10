@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { getDb } from './db.js';
+import { query } from './db.js';
 
 const CODE_TTL_MS = 5 * 60 * 1000;
 const PHONE_WINDOW_MS = 60 * 1000;
@@ -35,29 +35,33 @@ export function generateSmsCode(): string {
  * @param max - 窗口内最大次数
  * @returns 是否允许
  */
-function hitRateLimit(key: string, windowMs: number, max: number): boolean {
-  const database = getDb();
+async function hitRateLimit(key: string, windowMs: number, max: number): Promise<boolean> {
   const now = Date.now();
-  const row = database.prepare('SELECT window_start, count FROM sms_rate WHERE key = ?').get(key) as
-    | { window_start: string; count: number }
-    | undefined;
+  const row = (
+    await query<{ window_start: Date | string; count: number }>(
+      'SELECT window_start, count FROM sms_rate WHERE key = $1',
+      [key],
+    )
+  ).rows[0];
   if (!row) {
-    database
-      .prepare('INSERT INTO sms_rate (key, window_start, count) VALUES (?, ?, 1)')
-      .run(key, new Date(now).toISOString());
+    await query('INSERT INTO sms_rate (key, window_start, count) VALUES ($1, $2, 1)', [
+      key,
+      new Date(now).toISOString(),
+    ]);
     return true;
   }
-  const start = Date.parse(row.window_start);
+  const start = new Date(row.window_start).getTime();
   if (Number.isNaN(start) || now - start >= windowMs) {
-    database
-      .prepare('UPDATE sms_rate SET window_start = ?, count = 1 WHERE key = ?')
-      .run(new Date(now).toISOString(), key);
+    await query('UPDATE sms_rate SET window_start = $1, count = 1 WHERE key = $2', [
+      new Date(now).toISOString(),
+      key,
+    ]);
     return true;
   }
   if (row.count >= max) {
     return false;
   }
-  database.prepare('UPDATE sms_rate SET count = count + 1 WHERE key = ?').run(key);
+  await query('UPDATE sms_rate SET count = count + 1 WHERE key = $1', [key]);
   return true;
 }
 
@@ -97,7 +101,6 @@ async function sendAliyunSms(phone: string, code: string): Promise<void> {
     throw new Error('阿里云短信未配置完整：SMS_ACCESS_KEY_ID/SECRET、SMS_SIGN_NAME、SMS_TEMPLATE_CODE');
   }
 
-  // 使用阿里云 RPC 签名（简化：通过官方推荐的 OpenAPI 网关风格）
   const params: Record<string, string> = {
     AccessKeyId: accessKeyId,
     Action: 'SendSms',
@@ -145,10 +148,10 @@ async function sendAliyunSms(phone: string, code: string): Promise<void> {
  * @returns {Promise<void>}
  */
 export async function issueSmsCode(phone: string, ip: string): Promise<void> {
-  if (!hitRateLimit(`phone:${phone}`, PHONE_WINDOW_MS, PHONE_MAX_PER_WINDOW)) {
+  if (!(await hitRateLimit(`phone:${phone}`, PHONE_WINDOW_MS, PHONE_MAX_PER_WINDOW))) {
     throw new Error('发送过于频繁，请稍后再试');
   }
-  if (!hitRateLimit(`ip:${ip}`, IP_WINDOW_MS, IP_MAX_PER_WINDOW)) {
+  if (!(await hitRateLimit(`ip:${ip}`, IP_WINDOW_MS, IP_MAX_PER_WINDOW))) {
     throw new Error('当前网络发送次数过多，请稍后再试');
   }
 
@@ -160,17 +163,16 @@ export async function issueSmsCode(phone: string, ip: string): Promise<void> {
 
   const now = new Date();
   const expires = new Date(now.getTime() + CODE_TTL_MS).toISOString();
-  getDb()
-    .prepare(
-      `INSERT INTO sms_codes (phone, code_hash, expires_at, created_at, send_count)
-       VALUES (?, ?, ?, ?, 1)
-       ON CONFLICT(phone) DO UPDATE SET
-         code_hash = excluded.code_hash,
-         expires_at = excluded.expires_at,
-         created_at = excluded.created_at,
-         send_count = sms_codes.send_count + 1`,
-    )
-    .run(phone, hashSmsCode(code), expires, now.toISOString());
+  await query(
+    `INSERT INTO sms_codes (phone, code_hash, expires_at, created_at, send_count)
+     VALUES ($1, $2, $3, $4, 1)
+     ON CONFLICT (phone) DO UPDATE SET
+       code_hash = EXCLUDED.code_hash,
+       expires_at = EXCLUDED.expires_at,
+       created_at = EXCLUDED.created_at,
+       send_count = sms_codes.send_count + 1`,
+    [phone, hashSmsCode(code), expires, now.toISOString()],
+  );
 
   await deliverSmsCode(phone, code);
 }
@@ -182,20 +184,23 @@ export async function issueSmsCode(phone: string, ip: string): Promise<void> {
  * @param code - 用户输入
  * @returns 是否通过
  */
-export function verifySmsCode(phone: string, code: string): boolean {
-  const row = getDb()
-    .prepare('SELECT code_hash, expires_at FROM sms_codes WHERE phone = ?')
-    .get(phone) as { code_hash: string; expires_at: string } | undefined;
+export async function verifySmsCode(phone: string, code: string): Promise<boolean> {
+  const row = (
+    await query<{ code_hash: string; expires_at: Date | string }>(
+      'SELECT code_hash, expires_at FROM sms_codes WHERE phone = $1',
+      [phone],
+    )
+  ).rows[0];
   if (!row) {
     return false;
   }
-  if (Date.parse(row.expires_at) < Date.now()) {
-    getDb().prepare('DELETE FROM sms_codes WHERE phone = ?').run(phone);
+  if (new Date(row.expires_at).getTime() < Date.now()) {
+    await query('DELETE FROM sms_codes WHERE phone = $1', [phone]);
     return false;
   }
   const ok = row.code_hash === hashSmsCode(code.trim());
   if (ok) {
-    getDb().prepare('DELETE FROM sms_codes WHERE phone = ?').run(phone);
+    await query('DELETE FROM sms_codes WHERE phone = $1', [phone]);
   }
   return ok;
 }

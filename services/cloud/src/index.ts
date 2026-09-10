@@ -13,7 +13,13 @@ import {
   type AuthUser,
 } from './auth.js';
 import { catalogBodySchema, getCatalog, putCatalog } from './catalog.js';
-import { getDb } from './db.js';
+import {
+  createBillingOrder,
+  listBillingCatalog,
+  payBillingOrder,
+  switchToFreePlan,
+} from './billing.js';
+import { initDb } from './db.js';
 import { generateAnalysisMarkdown } from './deepseek.js';
 import { loadRelayEnvFile } from './load-env.js';
 import { normalizePhone } from './phone.js';
@@ -21,7 +27,6 @@ import { consumeAiQuota, getRemainingAiQuota } from './quota.js';
 import { issueSmsCode, verifySmsCode } from './sms.js';
 
 loadRelayEnvFile();
-getDb();
 
 const port = Number(process.env.PORT ?? 8780);
 const maxContextChars = Number(process.env.RELAY_MAX_CONTEXT_CHARS ?? 120_000);
@@ -75,6 +80,7 @@ app.get('/health', (_req, res) => {
     name: 'labhub-cloud',
     hasDeepSeekKey: Boolean((process.env.DEEPSEEK_API_KEY ?? '').trim()),
     smsProvider: process.env.SMS_PROVIDER || 'dev',
+    database: 'postgresql',
   });
 });
 
@@ -106,16 +112,16 @@ app.post('/v1/auth/register', async (req, res) => {
       res.status(400).json({ error: '请输入短信验证码' });
       return;
     }
-    if (!verifySmsCode(phone, code)) {
+    if (!(await verifySmsCode(phone, code))) {
       res.status(400).json({ error: '验证码错误或已过期' });
       return;
     }
-    const user = registerUser(phone, password, inviteCode);
+    const user = await registerUser(phone, password, inviteCode);
     const token = await signUserToken(user);
     res.status(201).json({
       token,
       registered: true,
-      user: toMeView(user),
+      user: await toMeView(user),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -130,12 +136,12 @@ app.post('/v1/auth/login', async (req, res) => {
   try {
     const phone = normalizePhone(String(req.body?.phone ?? ''));
     const password = String(req.body?.password ?? '');
-    const user = loginWithPassword(phone, password);
+    const user = await loginWithPassword(phone, password);
     const token = await signUserToken(user);
     res.json({
       token,
       registered: false,
-      user: toMeView(user),
+      user: await toMeView(user),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -154,16 +160,16 @@ app.post('/v1/auth/sms/verify', async (req, res) => {
       res.status(400).json({ error: '请输入验证码' });
       return;
     }
-    if (!verifySmsCode(phone, code)) {
+    if (!(await verifySmsCode(phone, code))) {
       res.status(400).json({ error: '验证码错误或已过期' });
       return;
     }
-    const user = loginExistingBySms(phone);
+    const user = await loginExistingBySms(phone);
     const token = await signUserToken(user);
     res.json({
       token,
       registered: false,
-      user: toMeView(user),
+      user: await toMeView(user),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -171,35 +177,99 @@ app.post('/v1/auth/sms/verify', async (req, res) => {
   }
 });
 
-app.get('/v1/auth/me', requireAuth, (req: AuthedRequest, res) => {
-  const fresh = findUserById(req.user!.id) ?? req.user!;
-  res.json({ user: toMeView(fresh) });
-});
-
-app.get('/v1/catalog', requireAuth, (req: AuthedRequest, res) => {
-  const user = findUserById(req.user!.id) ?? req.user!;
-  res.json({
-    projects: getCatalog(req.user!.id),
-    projectLimit: user.projectLimit,
-  });
-});
-
-app.put('/v1/catalog', requireAuth, (req: AuthedRequest, res) => {
-  const parsed = catalogBodySchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.flatten() });
-    return;
+app.get('/v1/auth/me', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    const fresh = (await findUserById(req.user!.id)) ?? req.user!;
+    res.json({ user: await toMeView(fresh) });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: message });
   }
-  const user = findUserById(req.user!.id) ?? req.user!;
-  if (parsed.data.projects.length > user.projectLimit) {
-    res.status(403).json({
-      error: `超出项目管理额度（最多 ${user.projectLimit} 个，当前提交 ${parsed.data.projects.length} 个）`,
+});
+
+app.get('/v1/catalog', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    const user = (await findUserById(req.user!.id)) ?? req.user!;
+    res.json({
+      projects: await getCatalog(req.user!.id),
       projectLimit: user.projectLimit,
     });
-    return;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: message });
   }
-  const projects = putCatalog(req.user!.id, parsed.data.projects);
-  res.json({ projects, projectLimit: user.projectLimit });
+});
+
+app.put('/v1/catalog', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    const parsed = catalogBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+    const user = (await findUserById(req.user!.id)) ?? req.user!;
+    if (parsed.data.projects.length > user.projectLimit) {
+      res.status(403).json({
+        error: `超出项目管理额度（最多 ${user.projectLimit} 个，当前提交 ${parsed.data.projects.length} 个）`,
+        projectLimit: user.projectLimit,
+      });
+      return;
+    }
+    const projects = await putCatalog(req.user!.id, parsed.data.projects);
+    res.json({ projects, projectLimit: user.projectLimit });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: message });
+  }
+});
+
+app.get('/v1/billing/catalog', (_req, res) => {
+  res.json(listBillingCatalog());
+});
+
+app.post('/v1/billing/checkout', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    const kind = String(req.body?.kind ?? 'plan') as 'plan' | 'ai_pack';
+    if (kind !== 'plan' && kind !== 'ai_pack') {
+      res.status(400).json({ error: '无效的订单类型' });
+      return;
+    }
+    const result = await createBillingOrder(req.user!.id, {
+      kind,
+      planId: typeof req.body?.planId === 'string' ? req.body.planId : undefined,
+      billingCycle: req.body?.billingCycle === 'yearly' ? 'yearly' : 'monthly',
+    });
+    res.status(201).json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ error: message });
+  }
+});
+
+app.post('/v1/billing/orders/:id/pay', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    const paid = await payBillingOrder(req.user!.id, String(req.params.id));
+    const fresh = (await findUserById(req.user!.id)) ?? req.user!;
+    res.json({
+      ...paid,
+      user: await toMeView(fresh),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const status = (error as { status?: number }).status;
+    res.status(typeof status === 'number' ? status : 400).json({ error: message });
+  }
+});
+
+app.post('/v1/billing/switch-free', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    await switchToFreePlan(req.user!.id);
+    const fresh = (await findUserById(req.user!.id)) ?? req.user!;
+    res.json({ user: await toMeView(fresh) });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ error: message });
+  }
 });
 
 const analyzeBodySchema = z.object({
@@ -225,7 +295,7 @@ app.post('/v1/analyze', requireAuth, async (req: AuthedRequest, res) => {
     return;
   }
 
-  const quota = getRemainingAiQuota(req.user!.id);
+  const quota = await getRemainingAiQuota(req.user!.id);
   if (quota.remaining <= 0) {
     res.status(402).json({
       error: '本月 AI 分析次数已用完',
@@ -236,11 +306,11 @@ app.post('/v1/analyze', requireAuth, async (req: AuthedRequest, res) => {
 
   try {
     const markdown = await generateAnalysisMarkdown(parsed.data.project, parsed.data.context);
-    const after = consumeAiQuota(req.user!.id);
+    const after = await consumeAiQuota(req.user!.id);
     res.json({
       markdown,
       source: 'deepseek',
-      aiQuota: after ?? getRemainingAiQuota(req.user!.id),
+      aiQuota: after ?? (await getRemainingAiQuota(req.user!.id)),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -249,18 +319,33 @@ app.post('/v1/analyze', requireAuth, async (req: AuthedRequest, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`[labhub-cloud] http://127.0.0.1:${port}`);
-  console.log('[labhub-cloud] DeepSeek / 短信密钥仅驻留本进程；勿提交 .env');
-  try {
-    const testUser = ensureDevTestUser();
-    if (testUser) {
-      console.log(
-        `[labhub-cloud] 开发测试账号已就绪：${testUser.phone} / ${testUser.password}`,
-      );
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn('[labhub-cloud] 写入开发测试账号失败：', message);
-  }
+/**
+ * 启动 Cloud：连库建表后监听端口。
+ *
+ * @returns {Promise<void>}
+ */
+async function main(): Promise<void> {
+  await initDb();
+  app.listen(port, () => {
+    console.log(`[labhub-cloud] http://127.0.0.1:${port}`);
+    console.log('[labhub-cloud] DeepSeek / 短信密钥仅驻留本进程；勿提交 .env');
+    void (async () => {
+      try {
+        const testUser = await ensureDevTestUser();
+        if (testUser) {
+          console.log(
+            `[labhub-cloud] 开发测试账号已就绪：${testUser.phone} / ${testUser.password}`,
+          );
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn('[labhub-cloud] 写入开发测试账号失败：', message);
+      }
+    })();
+  });
+}
+
+main().catch((error) => {
+  console.error('[labhub-cloud] 启动失败', error);
+  process.exit(1);
 });

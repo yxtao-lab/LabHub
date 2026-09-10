@@ -2,6 +2,7 @@ import { Router } from 'express';
 import {
   clearAuthState,
   getCloudUrl,
+  getUpgradeOffer,
   loadAuthState,
 } from '../auth-store.js';
 import {
@@ -27,22 +28,24 @@ export const authRouter = Router();
 authRouter.get('/status', async (_req, res, next) => {
   try {
     const cloudUrl = getCloudUrl();
+    const upgrade = getUpgradeOffer();
     const local = loadAuthState();
     if (!local || !cloudUrl) {
       res.json({
         cloudUrl: cloudUrl || null,
         loggedIn: false,
         user: null,
+        upgrade,
       });
       return;
     }
     try {
       const user = await cloudFetchMe();
-      res.json({ cloudUrl, loggedIn: Boolean(user), user });
+      res.json({ cloudUrl, loggedIn: Boolean(user), user, upgrade });
     } catch (error) {
       const status = (error as { status?: number }).status;
       if (status === 401) {
-        res.json({ cloudUrl, loggedIn: false, user: null });
+        res.json({ cloudUrl, loggedIn: false, user: null, upgrade });
         return;
       }
       res.json({
@@ -53,6 +56,7 @@ authRouter.get('/status', async (_req, res, next) => {
           phoneMasked: local.phoneMasked,
           aiQuota: null,
         },
+        upgrade,
         warning: error instanceof Error ? error.message : String(error),
       });
     }

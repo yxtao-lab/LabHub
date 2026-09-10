@@ -273,9 +273,12 @@ export async function addProject(
   if (me?.projectLimit != null) {
     const currentCount = loadProjects().length;
     if (currentCount >= me.projectLimit) {
-      throw new Error(
-        `已达项目管理上限（${me.projectLimit} 个）。可通过邀请好友注册提升额度（双方各 +1）`,
-      );
+      const error = new Error(
+        `已达项目管理上限（${me.projectLimit} 个）。请升级基础版扩容，或邀请好友注册（双方各 +1）`,
+      ) as Error & { status?: number; code?: string };
+      error.status = 403;
+      error.code = 'PROJECT_LIMIT';
+      throw error;
     }
   }
 

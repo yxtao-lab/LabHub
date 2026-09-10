@@ -44,8 +44,8 @@ npm run dev
 ```bash
 cd services/cloud
 cp .env.example .env
-# 必填：JWT_SECRET
-# 可选：INVITE_CODE（用户填写时才校验）
+# 必填：JWT_SECRET、DATABASE_URL
+# 本地库：docker compose up -d（默认 5433 端口，启动时自动建表）
 # 开发：SMS_PROVIDER=dev、SMS_DEV_CODE=123456（验证码打日志）
 # 生产：DEEPSEEK_API_KEY + SMS_PROVIDER=aliyun 及短信密钥
 npm install
@@ -60,12 +60,12 @@ npm run dev   # 默认 :8780
 }
 ```
 
-本地联调默认已是 `http://127.0.0.1:8780`。详见 [`services/cloud/README.md`](services/cloud/README.md)。
+本地联调默认已是 `http://127.0.0.1:8780`。套餐在控制台「套餐」内系统支付开通（免费 / 基础 ¥9.9 / 专业 ¥29；Cloud `PAYMENT_MODE=mock` 为模拟支付）。详见 [`services/cloud/README.md`](services/cloud/README.md)。
 
 | 角色 | Token / 密钥 |
 |------|----------------|
 | 普通用户 | 无 DeepSeek Token；须手机号登录；邀请码可选 |
-| Cloud 服务器 | `DEEPSEEK_API_KEY`、短信 AccessKey、`JWT_SECRET`、`INVITE_CODE` |
+| Cloud 服务器 | `DATABASE_URL`、`DEEPSEEK_API_KEY`、短信 AccessKey、`JWT_SECRET` |
 
 - AI 触发：仅「第一次被 LabHub 管理」且已登录且有配额  
 - 启动补缺 / 控制台「本地重生成」：不调 AI  

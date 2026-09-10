@@ -88,12 +88,29 @@ export type Project = {
 };
 
 /**
+ * 带业务码的 API 错误。
+ */
+export class ApiError extends Error {
+  code?: string;
+
+  /**
+   * @param message - 错误文案
+   * @param code - 可选业务码
+   */
+  constructor(message: string, code?: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.code = code;
+  }
+}
+
+/**
  * 调用 LabHub API。
  *
  * @param path - 以 /api 开头的路径
  * @param init - fetch 选项
  * @returns 解析后的 JSON
- * @throws {Error} 非 2xx 或业务 error 字段
+ * @throws {ApiError} 非 2xx 或业务 error 字段
  */
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -108,15 +125,15 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   const raw = await response.text();
-  let data: (T & { error?: unknown }) | null = null;
+  let data: (T & { error?: unknown; code?: string }) | null = null;
   if (raw) {
     try {
-      data = JSON.parse(raw) as T & { error?: unknown };
+      data = JSON.parse(raw) as T & { error?: unknown; code?: string };
     } catch {
       if (!response.ok) {
-        throw new Error(raw.slice(0, 200) || `请求失败 HTTP ${response.status}`);
+        throw new ApiError(raw.slice(0, 200) || `请求失败 HTTP ${response.status}`);
       }
-      throw new Error(`接口返回非 JSON（HTTP ${response.status}）：${raw.slice(0, 120)}`);
+      throw new ApiError(`接口返回非 JSON（HTTP ${response.status}）：${raw.slice(0, 120)}`);
     }
   }
 
@@ -125,7 +142,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
       data && typeof data.error === 'string'
         ? data.error
         : raw.slice(0, 200) || `请求失败 HTTP ${response.status}`;
-    throw new Error(message);
+    throw new ApiError(message, typeof data?.code === 'string' ? data.code : undefined);
   }
 
   return (data ?? ({} as T)) as T;

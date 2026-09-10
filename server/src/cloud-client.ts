@@ -15,6 +15,11 @@ export type CloudMeUser = {
   projectLimit?: number;
   projectCount?: number;
   projectRemaining?: number;
+  planId?: string;
+  planName?: string;
+  planExpiresAt?: string | null;
+  plan?: Record<string, unknown>;
+  aiBonus?: number;
   aiQuota: CloudAiQuota | null;
 };
 
@@ -287,5 +292,62 @@ export async function cloudAnalyze(
   return cloudFetch('/v1/analyze', {
     method: 'POST',
     body: JSON.stringify({ project, context }),
+  });
+}
+
+/**
+ * 拉取套餐目录。
+ *
+ * @returns 目录
+ */
+export async function cloudBillingCatalog(): Promise<{
+  paymentMode: string;
+  plans: unknown[];
+  aiPack: unknown;
+}> {
+  return cloudFetch('/v1/billing/catalog', undefined, null);
+}
+
+/**
+ * 创建计费订单。
+ *
+ * @param body - 下单参数
+ * @returns 订单
+ */
+export async function cloudBillingCheckout(body: {
+  kind: 'plan' | 'ai_pack';
+  planId?: string;
+  billingCycle?: 'monthly' | 'yearly';
+}): Promise<{ order: unknown; paymentMode: string; canPayInApp: boolean }> {
+  return cloudFetch('/v1/billing/checkout', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * 支付订单（mock 即时开通）。
+ *
+ * @param orderId - 订单 id
+ * @returns 支付结果
+ */
+export async function cloudBillingPay(
+  orderId: string,
+): Promise<{ order: unknown; paymentMode: string; user: CloudMeUser }> {
+  return cloudFetch(`/v1/billing/orders/${encodeURIComponent(orderId)}/pay`, {
+    method: 'POST',
+    body: '{}',
+  });
+}
+
+/**
+ * 切换到免费版。
+ *
+ * @returns 用户
+ */
+export async function cloudBillingSwitchFree(): Promise<{ user: CloudMeUser }> {
+  return cloudFetch('/v1/billing/switch-free', {
+    method: 'POST',
+    body: '{}',
   });
 }

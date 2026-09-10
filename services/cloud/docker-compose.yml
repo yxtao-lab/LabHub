@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: labhub-postgres
+    ports:
+      - '5433:5432'
+    environment:
+      POSTGRES_USER: labhub
+      POSTGRES_PASSWORD: labhub
+      POSTGRES_DB: labhub
+    volumes:
+      - labhub_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U labhub -d labhub']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  labhub_pg_data:

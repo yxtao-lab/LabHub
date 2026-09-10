@@ -1,9 +1,51 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { marked } from 'marked';
-import { api, type LogLine, type Project, type ProjectPhase, type RuntimeStatus } from './api';
+import {
+  api,
+  ApiError,
+  type LogLine,
+  type Project,
+  type ProjectPhase,
+  type RuntimeStatus,
+} from './api';
 
 type DetailTab = 'logs' | 'analysis';
+type UpgradeReason = 'project' | 'ai' | 'general';
+type BillingCycle = 'monthly' | 'yearly';
+
+type PlanFeature = {
+  key: string;
+  label: string;
+  value: string | boolean;
+};
+
+type PlanView = {
+  id: string;
+  name: string;
+  description: string;
+  priceMonthly: number;
+  priceYearly: number;
+  projectLimit: number;
+  aiMonthly: number;
+  features: PlanFeature[];
+  highlighted?: boolean;
+  isFree?: boolean;
+};
+
+type AiPackView = {
+  id: string;
+  name: string;
+  description: string;
+  price: number;
+  quota: number;
+};
+
+type BillingCatalog = {
+  paymentMode: string;
+  plans: PlanView[];
+  aiPack: AiPackView;
+};
 
 type ProjectAnalysis = {
   exists: boolean;
@@ -46,6 +88,13 @@ const buildProfileId = ref<string>('');
 const error = ref<string | null>(null);
 const busy = ref(false);
 const showAdd = ref(false);
+const showUpgrade = ref(false);
+const upgradeReason = ref<UpgradeReason>('general');
+const billingCatalog = ref<BillingCatalog | null>(null);
+const billingCycle = ref<BillingCycle>('monthly');
+const selectedPlanId = ref('basic');
+const billingBusy = ref(false);
+const billingMessage = ref<string | null>(null);
 /** 开发环境预填的 Cloud 测试账号（与 services/cloud 启动种子一致） */
 const DEV_TEST_PHONE = '13800138000';
 const DEV_TEST_PASSWORD = 'labhub123';
@@ -69,6 +118,10 @@ type CloudUser = {
   projectLimit?: number;
   projectCount?: number;
   projectRemaining?: number;
+  planId?: string;
+  planName?: string;
+  planExpiresAt?: string | null;
+  aiBonus?: number;
   aiQuota: {
     month: string;
     limit: number;
@@ -263,6 +316,180 @@ const runningCount = computed(
 );
 
 const missingProjects = computed(() => projects.value.filter((item) => !item.exists));
+
+const projectAtLimit = computed(() => {
+  const limit = authUser.value?.projectLimit;
+  if (limit == null) {
+    return false;
+  }
+  const count = authUser.value?.projectCount ?? projects.value.length;
+  return count >= limit;
+});
+
+const aiAtLimit = computed(() => {
+  const quota = authUser.value?.aiQuota;
+  return Boolean(quota && quota.remaining <= 0);
+});
+
+/**
+ * 拉取套餐目录。
+ *
+ * @returns {Promise<void>}
+ */
+async function loadBillingCatalog(): Promise<void> {
+  try {
+    billingCatalog.value = await api<BillingCatalog>('/api/billing/catalog');
+    if (!selectedPlanId.value || selectedPlanId.value === 'free') {
+      const preferred =
+        billingCatalog.value.plans.find((item) => item.highlighted)?.id ||
+        billingCatalog.value.plans.find((item) => !item.isFree)?.id ||
+        'basic';
+      selectedPlanId.value = preferred;
+    }
+  } catch (err) {
+    billingMessage.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+/**
+ * 打开升级 / 套餐管理弹窗。
+ *
+ * @param reason - 触发原因
+ * @returns {void}
+ */
+function openUpgrade(reason: UpgradeReason = 'general'): void {
+  upgradeReason.value = reason;
+  billingMessage.value = null;
+  showUpgrade.value = true;
+  showAdd.value = false;
+  if (reason === 'ai') {
+    selectedPlanId.value = 'ai_pack';
+  } else if (authUser.value?.planId && authUser.value.planId !== 'free') {
+    selectedPlanId.value = authUser.value.planId;
+  }
+  void loadBillingCatalog();
+}
+
+/**
+ * 尝试打开添加仓库；已达额度则引导升级。
+ *
+ * @returns {void}
+ */
+function openAddProject(): void {
+  if (projectAtLimit.value) {
+    openUpgrade('project');
+    return;
+  }
+  showAdd.value = true;
+}
+
+/**
+ * 若错误为项目额度上限，打开升级弹窗。
+ *
+ * @param err - 捕获的错误
+ * @returns 是否已处理为升级引导
+ */
+function maybeOpenUpgradeFromError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  const code = err instanceof ApiError ? err.code : undefined;
+  if (
+    code === 'PROJECT_LIMIT' ||
+    message.includes('项目管理上限') ||
+    message.includes('已达项目管理')
+  ) {
+    openUpgrade('project');
+    return true;
+  }
+  if (message.includes('AI 分析次数已用完') || message.includes('本月 AI')) {
+    openUpgrade('ai');
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 当前选中套餐价格文案。
+ */
+const selectedPlanPriceLabel = computed(() => {
+  if (selectedPlanId.value === 'ai_pack') {
+    const pack = billingCatalog.value?.aiPack;
+    return pack ? `¥${pack.price}` : '';
+  }
+  const plan = billingCatalog.value?.plans.find((item) => item.id === selectedPlanId.value);
+  if (!plan || plan.isFree) {
+    return '免费';
+  }
+  return billingCycle.value === 'yearly'
+    ? `¥${plan.priceYearly}/年`
+    : `¥${plan.priceMonthly}/月`;
+});
+
+/**
+ * 系统内下单并支付开通。
+ *
+ * @returns {Promise<void>}
+ */
+async function checkoutAndPay(): Promise<void> {
+  billingBusy.value = true;
+  billingMessage.value = null;
+  try {
+    const kind = selectedPlanId.value === 'ai_pack' ? 'ai_pack' : 'plan';
+    const checkout = await api<{
+      order: { id: string };
+      canPayInApp: boolean;
+      paymentMode: string;
+    }>('/api/billing/checkout', {
+      method: 'POST',
+      body: JSON.stringify({
+        kind,
+        planId: kind === 'plan' ? selectedPlanId.value : undefined,
+        billingCycle: billingCycle.value,
+      }),
+    });
+    if (!checkout.canPayInApp && checkout.paymentMode === 'live') {
+      billingMessage.value = '正式支付渠道尚未接入，请联系管理员或将 Cloud 设为 mock 支付。';
+      return;
+    }
+    const paid = await api<{ user: CloudUser }>(
+      `/api/billing/orders/${encodeURIComponent(checkout.order.id)}/pay`,
+      { method: 'POST', body: '{}' },
+    );
+    authUser.value = paid.user;
+    billingMessage.value = '支付成功，套餐已生效';
+    await refreshAuth();
+  } catch (err) {
+    billingMessage.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    billingBusy.value = false;
+  }
+}
+
+/**
+ * 降级到免费版。
+ *
+ * @returns {Promise<void>}
+ */
+async function switchToFree(): Promise<void> {
+  if (!window.confirm('确认切换到免费版？项目超额时将无法继续添加，已有项目仍可管理。')) {
+    return;
+  }
+  billingBusy.value = true;
+  billingMessage.value = null;
+  try {
+    const data = await api<{ user: CloudUser }>('/api/billing/switch-free', {
+      method: 'POST',
+      body: '{}',
+    });
+    authUser.value = data.user;
+    selectedPlanId.value = 'free';
+    billingMessage.value = '已切换为免费版';
+    await refreshAuth();
+  } catch (err) {
+    billingMessage.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    billingBusy.value = false;
+  }
+}
 
 /**
  * 刷新 Cloud 登录态。
@@ -623,6 +850,7 @@ async function runAction(action: () => Promise<void>): Promise<void> {
     await refresh();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
+    maybeOpenUpgradeFromError(err);
   } finally {
     busy.value = false;
   }
@@ -760,6 +988,7 @@ async function submitAdd(event: Event): Promise<void> {
     tagsInput.value = '';
     upstreamUrl.value = '';
     selectedId.value = data.project.id;
+    await refreshAuth();
   });
 }
 
@@ -1215,15 +1444,32 @@ watch(logProfileId, () => {
         >
           <span>{{ authUser.phoneMasked }}</span>
           <span
+            v-if="authUser.planName"
+            class="rounded border border-[var(--line)] px-1.5 py-0.5 text-[var(--accent)]"
+          >
+            {{ authUser.planName }}
+          </span>
+          <span
             v-if="authUser.projectLimit != null"
             class="text-[var(--muted)]"
             :title="authUser.inviteCode ? `我的邀请码 ${authUser.inviteCode}` : ''"
           >
             项目 {{ authUser.projectCount ?? projects.length }}/{{ authUser.projectLimit }}
           </span>
-          <span v-if="authUser.aiQuota" class="text-[var(--muted)]">
+          <span
+            v-if="authUser.aiQuota"
+            class="text-[var(--muted)]"
+            :class="aiAtLimit ? 'text-[var(--danger)]' : ''"
+          >
             AI {{ authUser.aiQuota.remaining }}/{{ authUser.aiQuota.limit }}
           </span>
+          <button
+            type="button"
+            class="rounded border border-[var(--accent)]/50 px-2 py-0.5 text-[var(--accent)] hover:bg-[var(--accent)]/10"
+            @click="openUpgrade(projectAtLimit ? 'project' : aiAtLimit ? 'ai' : 'general')"
+          >
+            套餐
+          </button>
           <button
             v-if="missingProjects.length > 0"
             type="button"
@@ -1275,7 +1521,7 @@ watch(logProfileId, () => {
               type="button"
               :disabled="busy"
               class="shrink-0 rounded-md bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[#06221f] hover:brightness-110 disabled:opacity-50"
-              @click="showAdd = true"
+              @click="openAddProject"
             >
               添加仓库
             </button>
@@ -1312,7 +1558,7 @@ watch(logProfileId, () => {
               :disabled="busy"
               class="hidden h-9 w-9 items-center justify-center rounded-md bg-[var(--accent)] text-lg font-semibold text-[#06221f] hover:brightness-110 disabled:opacity-50 lg:inline-flex"
               title="添加仓库"
-              @click="showAdd = true"
+              @click="openAddProject"
             >
               +
             </button>
@@ -1327,7 +1573,7 @@ watch(logProfileId, () => {
                 type="button"
                 :disabled="busy"
                 class="shrink-0 rounded-md bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[#06221f] hover:brightness-110 disabled:opacity-50"
-                @click="showAdd = true"
+                @click="openAddProject"
               >
                 添加仓库
               </button>
@@ -1376,7 +1622,7 @@ watch(logProfileId, () => {
               v-if="projects.length === 0"
               type="button"
               class="mt-4 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-[#06221f]"
-              @click="showAdd = true"
+              @click="openAddProject"
             >
               添加仓库
             </button>
@@ -1971,6 +2217,191 @@ watch(logProfileId, () => {
     </div>
 
     <div
+      v-if="showUpgrade"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      @click.self="showUpgrade = false"
+    >
+      <div class="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--panel)] p-5 shadow-2xl">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 class="text-lg font-medium">套餐与权限</h3>
+            <p class="mt-1 text-sm text-[var(--muted)]">
+              <template v-if="upgradeReason === 'project'">当前项目管理额度已满，请升级套餐后继续添加。</template>
+              <template v-else-if="upgradeReason === 'ai'">本月 AI 次数已用完，可升级套餐或购买加油包。</template>
+              <template v-else>在系统内选择套餐并支付开通，立即生效。</template>
+            </p>
+          </div>
+          <div
+            v-if="authUser"
+            class="rounded-lg border border-[var(--line)] bg-[#0b1016]/60 px-3 py-2 text-xs"
+          >
+            <p>
+              当前版本：
+              <span class="font-medium text-[var(--accent)]">{{ authUser.planName || '免费版' }}</span>
+            </p>
+            <p class="mt-1 text-[var(--muted)]">
+              项目 {{ authUser.projectCount ?? projects.length }}/{{ authUser.projectLimit ?? '-' }}
+              · AI {{ authUser.aiQuota?.remaining ?? '-' }}/{{ authUser.aiQuota?.limit ?? '-' }}
+            </p>
+            <p v-if="authUser.planExpiresAt" class="mt-1 text-[var(--muted)]">
+              到期 {{ authUser.planExpiresAt.slice(0, 10) }}
+            </p>
+          </div>
+        </div>
+
+        <div class="mt-4 flex flex-wrap items-center gap-2 text-xs">
+          <span class="text-[var(--muted)]">计费周期</span>
+          <button
+            type="button"
+            class="rounded-md border px-2.5 py-1"
+            :class="billingCycle === 'monthly' ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-[var(--line)] text-[var(--muted)]'"
+            @click="billingCycle = 'monthly'"
+          >
+            月付
+          </button>
+          <button
+            type="button"
+            class="rounded-md border px-2.5 py-1"
+            :class="billingCycle === 'yearly' ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-[var(--line)] text-[var(--muted)]'"
+            @click="billingCycle = 'yearly'"
+          >
+            年付更优惠
+          </button>
+        </div>
+
+        <div
+          v-if="billingCatalog"
+          class="mt-4 grid gap-3 md:grid-cols-3"
+        >
+          <button
+            v-for="plan in billingCatalog.plans"
+            :key="plan.id"
+            type="button"
+            class="rounded-lg border p-3 text-left transition"
+            :class="
+              selectedPlanId === plan.id
+                ? 'border-[var(--accent)] bg-[var(--accent)]/10'
+                : 'border-[var(--line)] bg-[#0b1016]/40 hover:border-[var(--accent)]/40'
+            "
+            @click="selectedPlanId = plan.id"
+          >
+            <div class="flex items-center justify-between gap-2">
+              <p class="font-medium">{{ plan.name }}</p>
+              <span
+                v-if="authUser?.planId === plan.id"
+                class="rounded bg-[var(--accent)]/20 px-1.5 py-0.5 text-[10px] text-[var(--accent)]"
+              >
+                当前
+              </span>
+            </div>
+            <p class="mt-1 text-xs text-[var(--muted)]">{{ plan.description }}</p>
+            <p class="mt-2 text-sm font-semibold text-[var(--accent)]">
+              <template v-if="plan.isFree">免费</template>
+              <template v-else-if="billingCycle === 'yearly'">¥{{ plan.priceYearly }}/年</template>
+              <template v-else>¥{{ plan.priceMonthly }}/月</template>
+            </p>
+            <ul class="mt-3 space-y-1 text-[11px] text-[var(--muted)]">
+              <li
+                v-for="feature in plan.features"
+                :key="feature.key"
+                class="flex justify-between gap-2"
+              >
+                <span>{{ feature.label }}</span>
+                <span class="text-[var(--text)]/80">
+                  {{ feature.value === true ? '✓' : feature.value === false ? '—' : feature.value }}
+                </span>
+              </li>
+            </ul>
+          </button>
+        </div>
+        <p v-else class="mt-4 text-sm text-[var(--muted)]">正在加载套餐…</p>
+
+        <div
+          v-if="billingCatalog?.aiPack"
+          class="mt-3 rounded-lg border border-[var(--line)] p-3"
+          :class="selectedPlanId === 'ai_pack' ? 'border-[var(--accent)] bg-[var(--accent)]/10' : 'bg-[#0b1016]/40'"
+        >
+          <button
+            type="button"
+            class="flex w-full items-start justify-between gap-3 text-left"
+            @click="selectedPlanId = 'ai_pack'"
+          >
+            <div>
+              <p class="font-medium">{{ billingCatalog.aiPack.name }}</p>
+              <p class="mt-1 text-xs text-[var(--muted)]">{{ billingCatalog.aiPack.description }}</p>
+            </div>
+            <p class="shrink-0 text-sm font-semibold text-[var(--accent)]">
+              ¥{{ billingCatalog.aiPack.price }} / {{ billingCatalog.aiPack.quota }} 次
+            </p>
+          </button>
+        </div>
+
+        <p
+          v-if="authUser?.inviteCode"
+          class="mt-3 text-[11px] text-[var(--muted)]"
+        >
+          邀请好友注册双方项目额度各 +1（不替代付费）。我的邀请码：
+          <span class="mono text-[var(--text)]">{{ authUser.inviteCode }}</span>
+        </p>
+
+        <p v-if="billingMessage" class="mt-3 text-xs" :class="billingMessage.includes('成功') || billingMessage.includes('已切换') ? 'text-[var(--accent)]' : 'text-[var(--danger)]'">
+          {{ billingMessage }}
+        </p>
+        <p
+          v-if="billingCatalog?.paymentMode === 'mock'"
+          class="mt-2 text-[11px] text-[var(--muted)]"
+        >
+          当前为系统内模拟支付：点击确认后立即开通（联调用）。正式环境可再接微信/支付宝。
+        </p>
+
+        <div class="mt-5 flex flex-wrap items-center justify-between gap-2">
+          <button
+            v-if="authUser?.planId && authUser.planId !== 'free'"
+            type="button"
+            class="rounded-lg border border-[var(--line)] px-3 py-2 text-xs text-[var(--muted)] hover:text-[var(--text)]"
+            :disabled="billingBusy"
+            @click="switchToFree"
+          >
+            切换到免费版
+          </button>
+          <div class="ml-auto flex gap-2">
+            <button
+              type="button"
+              class="rounded-lg px-4 py-2 text-sm text-[var(--muted)] hover:text-white"
+              @click="showUpgrade = false"
+            >
+              关闭
+            </button>
+            <button
+              v-if="selectedPlanId === 'free'"
+              type="button"
+              class="rounded-lg border border-[var(--line)] px-4 py-2 text-sm"
+              :disabled="billingBusy || authUser?.planId === 'free'"
+              @click="switchToFree"
+            >
+              {{ authUser?.planId === 'free' ? '已是免费版' : '确认使用免费版' }}
+            </button>
+            <button
+              v-else
+              type="button"
+              class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[#06221f] disabled:opacity-50"
+              :disabled="billingBusy"
+              @click="checkoutAndPay"
+            >
+              {{
+                billingBusy
+                  ? '处理中…'
+                  : selectedPlanId !== 'ai_pack' && authUser?.planId === selectedPlanId
+                    ? `续费 ${selectedPlanPriceLabel}`
+                    : `支付 ${selectedPlanPriceLabel} 并开通`
+              }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div
       v-if="showAdd"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
     >
@@ -1981,6 +2412,20 @@ watch(logProfileId, () => {
         <h3 class="text-lg font-medium">添加 Git 仓库</h3>
         <p class="mt-1 text-sm text-[var(--muted)]">
           粘贴 GitHub / Gitee 地址，将浅克隆到 projects/ 下。
+        </p>
+        <p
+          v-if="authUser?.projectLimit != null"
+          class="mt-2 text-xs text-[var(--muted)]"
+        >
+          当前额度
+          {{ authUser.projectCount ?? projects.length }}/{{ authUser.projectLimit }}
+          <button
+            type="button"
+            class="ml-2 text-[var(--accent)] hover:underline"
+            @click="openUpgrade('project')"
+          >
+            查看升级
+          </button>
         </p>
         <label class="mt-4 block text-sm">
           仓库 URL

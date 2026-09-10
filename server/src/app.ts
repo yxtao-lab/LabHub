@@ -3,6 +3,7 @@ import cors from 'cors';
 import express, { type ErrorRequestHandler } from 'express';
 import { requireLocalLogin } from './require-auth.js';
 import { authRouter } from './routes/auth.js';
+import { billingRouter } from './routes/billing.js';
 import { projectsRouter } from './routes/projects.js';
 import { ROOT_DIR } from './store.js';
 
@@ -21,6 +22,7 @@ export function createApp() {
   });
 
   app.use('/api/auth', authRouter);
+  app.use('/api/billing', billingRouter);
   app.use('/api/projects', requireLocalLogin, projectsRouter);
 
   const clientDist = path.join(ROOT_DIR, 'client', 'dist');
@@ -35,7 +37,11 @@ export function createApp() {
     const message = error instanceof Error ? error.message : String(error);
     console.error('[labhub]', message);
     const status = (error as { status?: number }).status;
-    res.status(typeof status === 'number' && status >= 400 ? status : 400).json({ error: message });
+    const code = (error as { code?: string }).code;
+    res.status(typeof status === 'number' && status >= 400 ? status : 400).json({
+      error: message,
+      ...(typeof code === 'string' && code ? { code } : {}),
+    });
   };
   app.use(errorHandler);
 

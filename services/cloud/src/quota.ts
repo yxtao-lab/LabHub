@@ -1,4 +1,5 @@
-import { getDb } from './db.js';
+import { getUserAiTotalLimit } from './billing.js';
+import { query, withTransaction } from './db.js';
 
 /**
  * 当前 UTC 月份键 YYYY-MM。
@@ -10,13 +11,13 @@ export function currentMonthKey(): string {
 }
 
 /**
- * 读取月配额上限。
+ * 环境变量默认月配额（无用户套餐时兜底）。
  *
  * @returns 次数
  */
-export function getMonthlyQuotaLimit(): number {
-  const n = Number(process.env.AI_QUOTA_MONTHLY ?? 20);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 20;
+export function getMonthlyQuotaLimitFallback(): number {
+  const n = Number(process.env.AI_QUOTA_MONTHLY ?? 5);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 5;
 }
 
 /**
@@ -25,17 +26,20 @@ export function getMonthlyQuotaLimit(): number {
  * @param userId - 用户 id
  * @returns 配额视图
  */
-export function getRemainingAiQuota(userId: string): {
+export async function getRemainingAiQuota(userId: string): Promise<{
   month: string;
   limit: number;
   used: number;
   remaining: number;
-} {
+}> {
   const month = currentMonthKey();
-  const limit = getMonthlyQuotaLimit();
-  const row = getDb()
-    .prepare('SELECT used FROM ai_usage WHERE user_id = ? AND month_key = ?')
-    .get(userId, month) as { used: number } | undefined;
+  const limit = await getUserAiTotalLimit(userId);
+  const row = (
+    await query<{ used: number }>(
+      'SELECT used FROM ai_usage WHERE user_id = $1 AND month_key = $2',
+      [userId, month],
+    )
+  ).rows[0];
   const used = row?.used ?? 0;
   return {
     month,
@@ -51,28 +55,34 @@ export function getRemainingAiQuota(userId: string): {
  * @param userId - 用户 id
  * @returns 扣减后配额；不足则 null
  */
-export function consumeAiQuota(userId: string): ReturnType<typeof getRemainingAiQuota> | null {
+export async function consumeAiQuota(
+  userId: string,
+): Promise<Awaited<ReturnType<typeof getRemainingAiQuota>> | null> {
   const month = currentMonthKey();
-  const limit = getMonthlyQuotaLimit();
-  const database = getDb();
-  const tx = database.transaction(() => {
-    const row = database
-      .prepare('SELECT used FROM ai_usage WHERE user_id = ? AND month_key = ?')
-      .get(userId, month) as { used: number } | undefined;
+  const limit = await getUserAiTotalLimit(userId);
+
+  return withTransaction(async (client) => {
+    const row = (
+      await client.query<{ used: number }>(
+        'SELECT used FROM ai_usage WHERE user_id = $1 AND month_key = $2 FOR UPDATE',
+        [userId, month],
+      )
+    ).rows[0];
     const used = row?.used ?? 0;
     if (used >= limit) {
       return null;
     }
     if (row) {
-      database
-        .prepare('UPDATE ai_usage SET used = used + 1 WHERE user_id = ? AND month_key = ?')
-        .run(userId, month);
+      await client.query(
+        'UPDATE ai_usage SET used = used + 1 WHERE user_id = $1 AND month_key = $2',
+        [userId, month],
+      );
     } else {
-      database
-        .prepare('INSERT INTO ai_usage (user_id, month_key, used) VALUES (?, ?, 1)')
-        .run(userId, month);
+      await client.query(
+        'INSERT INTO ai_usage (user_id, month_key, used) VALUES ($1, $2, 1)',
+        [userId, month],
+      );
     }
     return getRemainingAiQuota(userId);
   });
-  return tx();
 }

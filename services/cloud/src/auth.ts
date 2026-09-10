@@ -1,13 +1,16 @@
 import crypto from 'node:crypto';
 import { SignJWT, jwtVerify } from 'jose';
+import type pg from 'pg';
 import {
   defaultProjectLimit,
   generateInviteCodeValue,
-  getDb,
+  query,
+  withTransaction,
 } from './db.js';
 import { maskPhone } from './phone.js';
 import { getRemainingAiQuota } from './quota.js';
 import { getCatalog } from './catalog.js';
+import { resolveUserPlan } from './billing.js';
 
 export type AuthUser = {
   id: string;
@@ -24,6 +27,9 @@ type UserRow = {
   project_limit: number;
   invited_by: string | null;
 };
+
+const USER_SELECT =
+  'SELECT id, phone, password_hash, invite_code, project_limit, invited_by FROM users';
 
 /**
  * 读取 JWT 密钥。
@@ -115,7 +121,7 @@ export async function verifyUserToken(token: string): Promise<AuthUser> {
   if (!id) {
     throw new Error('无效登录态');
   }
-  const user = findUserById(id);
+  const user = await findUserById(id);
   if (!user) {
     throw new Error('用户不存在或已失效');
   }
@@ -128,12 +134,8 @@ export async function verifyUserToken(token: string): Promise<AuthUser> {
  * @param id - 用户 id
  * @returns 用户或 null
  */
-export function findUserById(id: string): AuthUser | null {
-  const row = getDb()
-    .prepare(
-      'SELECT id, phone, password_hash, invite_code, project_limit, invited_by FROM users WHERE id = ?',
-    )
-    .get(id) as UserRow | undefined;
+export async function findUserById(id: string): Promise<AuthUser | null> {
+  const row = (await query<UserRow>(`${USER_SELECT} WHERE id = $1`, [id])).rows[0];
   return row ? rowToUser(row) : null;
 }
 
@@ -143,12 +145,8 @@ export function findUserById(id: string): AuthUser | null {
  * @param phone - 手机号
  * @returns 用户或 null
  */
-export function findUserByPhone(phone: string): AuthUser | null {
-  const row = getDb()
-    .prepare(
-      'SELECT id, phone, password_hash, invite_code, project_limit, invited_by FROM users WHERE phone = ?',
-    )
-    .get(phone) as UserRow | undefined;
+export async function findUserByPhone(phone: string): Promise<AuthUser | null> {
+  const row = (await query<UserRow>(`${USER_SELECT} WHERE phone = $1`, [phone])).rows[0];
   return row ? rowToUser(row) : null;
 }
 
@@ -158,31 +156,31 @@ export function findUserByPhone(phone: string): AuthUser | null {
  * @param inviteCode - 邀请码
  * @returns 用户或 null
  */
-export function findUserByInviteCode(inviteCode: string): AuthUser | null {
+export async function findUserByInviteCode(inviteCode: string): Promise<AuthUser | null> {
   const code = inviteCode.trim().toUpperCase();
   if (!code) {
     return null;
   }
-  const row = getDb()
-    .prepare(
-      'SELECT id, phone, password_hash, invite_code, project_limit, invited_by FROM users WHERE upper(invite_code) = ?',
-    )
-    .get(code) as UserRow | undefined;
+  const row = (
+    await query<UserRow>(`${USER_SELECT} WHERE upper(invite_code) = $1`, [code])
+  ).rows[0];
   return row ? rowToUser(row) : null;
 }
 
 /**
  * 生成不冲突的个人邀请码。
  *
+ * @param client - 可选事务客户端
  * @returns 邀请码
  */
-function allocateInviteCode(): string {
+async function allocateInviteCode(client?: pg.PoolClient): Promise<string> {
+  const run = async (text: string, params: unknown[]) =>
+    client ? client.query(text, params) : query(text, params);
+
   for (let i = 0; i < 20; i += 1) {
     const code = generateInviteCodeValue();
-    const exists = getDb()
-      .prepare('SELECT 1 FROM users WHERE invite_code = ?')
-      .get(code);
-    if (!exists) {
+    const exists = await run('SELECT 1 FROM users WHERE invite_code = $1', [code]);
+    if (exists.rowCount === 0) {
       return code;
     }
   }
@@ -210,12 +208,12 @@ export function assertPassword(password: string): void {
  * @param inviteCode - 可选邀请码
  * @returns 新用户
  */
-export function registerUser(
+export async function registerUser(
   phone: string,
   password: string,
   inviteCode?: string,
-): AuthUser {
-  if (findUserByPhone(phone)) {
+): Promise<AuthUser> {
+  if (await findUserByPhone(phone)) {
     throw new Error('该手机号已注册，请直接登录');
   }
   assertPassword(password);
@@ -223,7 +221,7 @@ export function registerUser(
   const submitted = (inviteCode ?? '').trim();
   let inviter: AuthUser | null = null;
   if (submitted) {
-    inviter = findUserByInviteCode(submitted);
+    inviter = await findUserByInviteCode(submitted);
     if (!inviter) {
       throw new Error('邀请码无效');
     }
@@ -231,19 +229,16 @@ export function registerUser(
 
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
-  const myInvite = allocateInviteCode();
   const baseLimit = defaultProjectLimit();
   const projectLimit = inviter ? baseLimit + 1 : baseLimit;
 
-  const database = getDb();
-  const tx = database.transaction(() => {
-    database
-      .prepare(
-        `INSERT INTO users
-         (id, phone, password_hash, invite_code, project_limit, invited_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
+  await withTransaction(async (client) => {
+    const myInvite = await allocateInviteCode(client);
+    await client.query(
+      `INSERT INTO users
+       (id, phone, password_hash, invite_code, project_limit, invited_by, plan_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'free', $7, $8)`,
+      [
         id,
         phone,
         hashPassword(password),
@@ -252,21 +247,21 @@ export function registerUser(
         inviter?.id ?? null,
         now,
         now,
-      );
-    database
-      .prepare('INSERT INTO catalogs (user_id, projects_json, updated_at) VALUES (?, ?, ?)')
-      .run(id, '[]', now);
+      ],
+    );
+    await client.query(
+      'INSERT INTO catalogs (user_id, projects_json, updated_at) VALUES ($1, $2::jsonb, $3)',
+      [id, '[]', now],
+    );
     if (inviter) {
-      database
-        .prepare(
-          'UPDATE users SET project_limit = project_limit + 1, updated_at = ? WHERE id = ?',
-        )
-        .run(now, inviter.id);
+      await client.query(
+        'UPDATE users SET project_limit = project_limit + 1, updated_at = $1 WHERE id = $2',
+        [now, inviter.id],
+      );
     }
   });
-  tx();
 
-  return findUserById(id)!;
+  return (await findUserById(id))!;
 }
 
 /**
@@ -275,7 +270,7 @@ export function registerUser(
  *
  * @returns 测试账号手机号与密码；未启用时返回 null
  */
-export function ensureDevTestUser(): { phone: string; password: string } | null {
+export async function ensureDevTestUser(): Promise<{ phone: string; password: string } | null> {
   const seedFlag = (process.env.SEED_DEV_USER ?? '').trim() === '1';
   const isDevSms = (process.env.SMS_PROVIDER || 'dev').trim() === 'dev';
   if (!seedFlag && !isDevSms) {
@@ -286,45 +281,33 @@ export function ensureDevTestUser(): { phone: string; password: string } | null 
   const password = (process.env.DEV_TEST_PASSWORD ?? 'labhub123').trim();
   assertPassword(password);
 
-  const existing = getDb()
-    .prepare(
-      'SELECT id, phone, password_hash, invite_code, project_limit, invited_by FROM users WHERE phone = ?',
-    )
-    .get(phone) as UserRow | undefined;
+  const existing = (
+    await query<UserRow>(`${USER_SELECT} WHERE phone = $1`, [phone])
+  ).rows[0];
 
   if (existing) {
     if (!existing.password_hash || !verifyPassword(password, existing.password_hash)) {
-      setUserPassword(existing.id, password);
+      await setUserPassword(existing.id, password);
     }
     return { phone, password };
   }
 
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
-  const myInvite = allocateInviteCode();
-  const database = getDb();
-  const tx = database.transaction(() => {
-    database
-      .prepare(
-        `INSERT INTO users
-         (id, phone, password_hash, invite_code, project_limit, invited_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        id,
-        phone,
-        hashPassword(password),
-        myInvite,
-        defaultProjectLimit(),
-        null,
-        now,
-        now,
-      );
-    database
-      .prepare('INSERT INTO catalogs (user_id, projects_json, updated_at) VALUES (?, ?, ?)')
-      .run(id, '[]', now);
+
+  await withTransaction(async (client) => {
+    const myInvite = await allocateInviteCode(client);
+    await client.query(
+      `INSERT INTO users
+       (id, phone, password_hash, invite_code, project_limit, invited_by, plan_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'free', $7, $8)`,
+      [id, phone, hashPassword(password), myInvite, defaultProjectLimit(), null, now, now],
+    );
+    await client.query(
+      'INSERT INTO catalogs (user_id, projects_json, updated_at) VALUES ($1, $2::jsonb, $3)',
+      [id, '[]', now],
+    );
   });
-  tx();
 
   return { phone, password };
 }
@@ -336,12 +319,8 @@ export function ensureDevTestUser(): { phone: string; password: string } | null 
  * @param password - 密码
  * @returns 用户
  */
-export function loginWithPassword(phone: string, password: string): AuthUser {
-  const row = getDb()
-    .prepare(
-      'SELECT id, phone, password_hash, invite_code, project_limit, invited_by FROM users WHERE phone = ?',
-    )
-    .get(phone) as UserRow | undefined;
+export async function loginWithPassword(phone: string, password: string): Promise<AuthUser> {
+  const row = (await query<UserRow>(`${USER_SELECT} WHERE phone = $1`, [phone])).rows[0];
   if (!row) {
     throw new Error('手机号或密码错误');
   }
@@ -360,8 +339,8 @@ export function loginWithPassword(phone: string, password: string): AuthUser {
  * @param phone - 手机号
  * @returns 用户
  */
-export function loginExistingBySms(phone: string): AuthUser {
-  const user = findUserByPhone(phone);
+export async function loginExistingBySms(phone: string): Promise<AuthUser> {
+  const user = await findUserByPhone(phone);
   if (!user) {
     throw new Error('该手机号尚未注册，请先注册');
   }
@@ -373,13 +352,15 @@ export function loginExistingBySms(phone: string): AuthUser {
  *
  * @param userId - 用户 id
  * @param password - 新密码
- * @returns {void}
+ * @returns {Promise<void>}
  */
-export function setUserPassword(userId: string, password: string): void {
+export async function setUserPassword(userId: string, password: string): Promise<void> {
   assertPassword(password);
-  getDb()
-    .prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?')
-    .run(hashPassword(password), new Date().toISOString(), userId);
+  await query('UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3', [
+    hashPassword(password),
+    new Date().toISOString(),
+    userId,
+  ]);
 }
 
 /**
@@ -388,16 +369,22 @@ export function setUserPassword(userId: string, password: string): void {
  * @param user - 用户
  * @returns me 视图
  */
-export function toMeView(user: AuthUser) {
-  const quota = getRemainingAiQuota(user.id);
-  const projects = getCatalog(user.id);
+export async function toMeView(user: AuthUser) {
+  const resolved = await resolveUserPlan(user.id);
+  const quota = await getRemainingAiQuota(user.id);
+  const projects = await getCatalog(user.id);
   return {
     id: user.id,
     phoneMasked: maskPhone(user.phone),
     inviteCode: user.inviteCode,
-    projectLimit: user.projectLimit,
+    projectLimit: resolved.projectLimit,
     projectCount: projects.length,
-    projectRemaining: Math.max(0, user.projectLimit - projects.length),
+    projectRemaining: Math.max(0, resolved.projectLimit - projects.length),
+    planId: resolved.planId,
+    planName: resolved.planName,
+    planExpiresAt: resolved.planExpiresAt,
+    plan: resolved.plan,
+    aiBonus: resolved.aiBonus,
     aiQuota: quota,
   };
 }

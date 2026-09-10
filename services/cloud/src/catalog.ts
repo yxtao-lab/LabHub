@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { getDb } from './db.js';
+import { query } from './db.js';
 
 const catalogProjectSchema = z.object({
   id: z.string().min(1),
@@ -34,15 +34,20 @@ export type CatalogProject = z.infer<typeof catalogProjectSchema>;
  * @param userId - 用户 id
  * @returns 项目元数据列表
  */
-export function getCatalog(userId: string): CatalogProject[] {
-  const row = getDb()
-    .prepare('SELECT projects_json FROM catalogs WHERE user_id = ?')
-    .get(userId) as { projects_json: string } | undefined;
+export async function getCatalog(userId: string): Promise<CatalogProject[]> {
+  const row = (
+    await query<{ projects_json: unknown }>('SELECT projects_json FROM catalogs WHERE user_id = $1', [
+      userId,
+    ])
+  ).rows[0];
   if (!row) {
     return [];
   }
   try {
-    const parsed = JSON.parse(row.projects_json) as unknown;
+    const parsed =
+      typeof row.projects_json === 'string'
+        ? (JSON.parse(row.projects_json) as unknown)
+        : row.projects_json;
     const result = z.array(catalogProjectSchema).safeParse(parsed);
     return result.success ? result.data : [];
   } catch {
@@ -57,15 +62,17 @@ export function getCatalog(userId: string): CatalogProject[] {
  * @param projects - 项目列表
  * @returns 写入后的列表
  */
-export function putCatalog(userId: string, projects: CatalogProject[]): CatalogProject[] {
+export async function putCatalog(
+  userId: string,
+  projects: CatalogProject[],
+): Promise<CatalogProject[]> {
   const now = new Date().toISOString();
-  getDb()
-    .prepare(
-      `INSERT INTO catalogs (user_id, projects_json, updated_at) VALUES (?, ?, ?)
-       ON CONFLICT(user_id) DO UPDATE SET
-         projects_json = excluded.projects_json,
-         updated_at = excluded.updated_at`,
-    )
-    .run(userId, JSON.stringify(projects), now);
+  await query(
+    `INSERT INTO catalogs (user_id, projects_json, updated_at) VALUES ($1, $2::jsonb, $3)
+     ON CONFLICT (user_id) DO UPDATE SET
+       projects_json = EXCLUDED.projects_json,
+       updated_at = EXCLUDED.updated_at`,
+    [userId, JSON.stringify(projects), now],
+  );
   return projects;
 }

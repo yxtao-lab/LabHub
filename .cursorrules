@@ -1,0 +1,12 @@
+# LabHub 工作区规则（影响 SCM「生成提交信息」等）
+
+## 生成 Git 提交信息时（必须）
+- 一律使用**简体中文**撰写提交说明（type/scope 仍用英文 Conventional Commits）。
+- 格式：`feat(scope): 中文概述` / `fix(scope): 中文概述` / `chore` / `docs` / `refactor` / `test` / `style`。
+- 第一行概述；若需补充：空一行后再写详细说明。
+- 不要用纯英文句子作为 subject（禁止 “Implement …”, “Add …”, “Update …” 整句英文）。
+- 正确示例：`fix(worker): 完善 UUID 配置与中间件接入`
+- 错误示例：`Implement middleware support and UUID configuration`
+
+## 其它
+- Agent 对话与注释同样优先中文；细节见 `.cursor/rules/`。

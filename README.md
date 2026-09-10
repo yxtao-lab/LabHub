@@ -7,7 +7,7 @@ FreeLLMAPI 只是被管理的项目之一，不是中枢本身。
 
 1. **提供 GitHub / Gitee 地址** → 浅克隆到 `projects/<id>/` 并登记  
 2. **改代码、提交** → 在对应项目目录里正常 `git commit` / `git push origin`，推回**该项目源仓库**  
-3. **管理控制台** → 启停、运行状态、PID、日志监控  
+3. **管理控制台** → 多端启动模式分启停、运行状态、PID、日志监控；可配置研发分期（P0/P1…）  
 4. **项目分析总结** → 读取各仓 `docs/项目分析总结.md` 并在控制台「分析总结」页展示  
 
 ## 目录结构
@@ -26,10 +26,12 @@ labhub/                 ← 主体（本仓库）
 cd E:\Desktop\TYX\AI\labhub
 npm install
 npm run seed:demo    # 克隆/登记 freellmapi 与 edgetunnel 到 projects/
-npm run dev          # API + 控制台
+npm run dev          # 仅启动 LabHub API + 控制台；不会自动启动托管项目
 ```
 
-打开 http://127.0.0.1:5177
+打开 http://127.0.0.1:5177  
+
+托管项目需在控制台按需点「启动」；LabHub 重启后也不会自动拉起它们。
 
 ### 添加任意仓库
 

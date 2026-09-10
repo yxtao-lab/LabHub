@@ -1,4 +1,8 @@
+import { execFile } from 'node:child_process';
 import net from 'node:net';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 /**
  * 从 URL 中解析主机与端口。
@@ -71,6 +75,84 @@ export async function findListeningUrl(urls: string[]): Promise<string | null> {
     }
   }
   return null;
+}
+
+/**
+ * 查找占用指定端口的监听进程 PID（Windows netstat / Unix lsof）。
+ *
+ * @param port - 端口号
+ * @returns PID 列表（去重）
+ */
+export async function findPidsByPort(port: number): Promise<number[]> {
+  const pids = new Set<number>();
+  try {
+    if (process.platform === 'win32') {
+      const { stdout } = await execFileAsync('netstat', ['-ano', '-p', 'tcp'], {
+        windowsHide: true,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+      const needle = `:${port}`;
+      for (const line of stdout.split(/\r?\n/)) {
+        if (!/LISTENING/i.test(line) || !line.includes(needle)) {
+          continue;
+        }
+        const normalized = line.replace(/\s+/g, ' ').trim();
+        const parts = normalized.split(' ');
+        const local = parts[1] ?? '';
+        // 避免 :3000 误匹配 :30001
+        if (!local.endsWith(needle) && !local.includes(`]:${port}`)) {
+          continue;
+        }
+        const pid = Number(parts[parts.length - 1]);
+        if (Number.isInteger(pid) && pid > 0) {
+          pids.add(pid);
+        }
+      }
+    } else {
+      try {
+        const { stdout } = await execFileAsync('lsof', [
+          '-nP',
+          `-iTCP:${port}`,
+          '-sTCP:LISTEN',
+          '-t',
+        ]);
+        for (const part of stdout.split(/\s+/)) {
+          const pid = Number(part.trim());
+          if (Number.isInteger(pid) && pid > 0) {
+            pids.add(pid);
+          }
+        }
+      } catch {
+        // lsof 不可用时忽略
+      }
+    }
+  } catch {
+    // netstat/lsof 失败时返回已收集结果
+  }
+  return [...pids];
+}
+
+/**
+ * 收集候选 URL 对应端口上的监听 PID。
+ *
+ * @param urls - openUrl 等候选地址
+ * @returns PID 列表
+ */
+export async function findListeningPids(urls: string[]): Promise<number[]> {
+  const pids = new Set<number>();
+  const ports = new Set<number>();
+  for (const url of urls) {
+    const target = parseHostPort(url);
+    if (target) {
+      ports.add(target.port);
+    }
+  }
+  for (const port of ports) {
+    for (const pid of await findPidsByPort(port)) {
+      pids.add(pid);
+    }
+  }
+  return [...pids];
 }
 
 /**

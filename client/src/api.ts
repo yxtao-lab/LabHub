@@ -6,6 +6,37 @@ export type LogLine = {
   text: string;
 };
 
+export type StartProfile = {
+  id: string;
+  name: string;
+  command: string;
+  openUrl?: string | null;
+  cwd?: string | null;
+  phase?: string | null;
+  description?: string;
+};
+
+export type ProjectPhase = {
+  id: string;
+  name: string;
+  status: 'done' | 'current' | 'planned';
+  summary: string;
+};
+
+export type ProfileRuntimeView = {
+  profile: StartProfile;
+  runtime: {
+    status: RuntimeStatus;
+    pid: number | null;
+    startedAt: string | null;
+    exitedAt: string | null;
+    exitCode: number | null;
+    error: string | null;
+    profileId?: string | null;
+  };
+  runtimeUrls: string[];
+};
+
 export type Project = {
   id: string;
   name: string;
@@ -34,7 +65,13 @@ export type Project = {
     exitedAt: string | null;
     exitCode: number | null;
     error: string | null;
+    profileId?: string | null;
   };
+  profileRuntimes: ProfileRuntimeView[];
+  startProfiles: StartProfile[];
+  defaultProfileId: string;
+  phases: ProjectPhase[];
+  currentPhase: string | null;
   recentLogs: LogLine[];
   runtimeUrls: string[];
   hasAnalysis: boolean;

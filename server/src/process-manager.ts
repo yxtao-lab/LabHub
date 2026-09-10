@@ -4,20 +4,24 @@ import {
   getPersistedRuntime,
   upsertRuntime,
 } from './runtime-store.js';
-import { findListeningUrl, isProcessAlive } from './process-probe.js';
+import { findListeningPids, findListeningUrl, isProcessAlive } from './process-probe.js';
 import type { LogLine, RuntimeState, RuntimeStatus } from './types.js';
 
 const MAX_LOG_LINES = 500;
 
 type ManagedProcess = {
   child: ChildProcess | null;
+  /** 本 LabHub 进程内是否由控制台主动 start 过（重启后为 false） */
+  ownedByHub: boolean;
   runtime: RuntimeState;
   logs: LogLine[];
 };
 
 /**
  * 多项目进程管理器：启停、状态、环形日志缓冲。
- * 状态以真实 PID 存活与端口监听为准，并持久化到 data/runtime.json，避免服务重启后误判。
+ *
+ * 约定：启动 LabHub 本身不会自动拉起托管项目；仅用户点击启动后才 spawn。
+ * 「运行中」只认本会话托管的进程；单纯端口被占用不会标成已启动。
  */
 export class ProcessManager {
   private readonly processes = new Map<string, ManagedProcess>();
@@ -47,14 +51,14 @@ export class ProcessManager {
   }
 
   /**
-   * 启动项目命令；已在运行则抛错。
+   * 启动项目命令；已在运行或端口被外部占用则抛错。
    *
    * @param projectId - 项目 id
    * @param cwd - 工作目录
    * @param command - shell 命令行（如 npm run dev）
-   * @param probeUrls - 启动前用于检测是否已在外部运行
+   * @param probeUrls - 启动前用于检测端口占用
    * @returns 启动后的运行态
-   * @throws {Error} 已在运行或启动失败时抛出
+   * @throws {Error} 已在运行、端口占用或启动失败时抛出
    */
   async start(
     projectId: string,
@@ -67,7 +71,15 @@ export class ProcessManager {
       throw new Error(`项目已在运行：${projectId}${current.pid ? `（pid ${current.pid}）` : ''}`);
     }
 
+    const listeningUrl = await findListeningUrl(probeUrls);
+    if (listeningUrl) {
+      throw new Error(
+        `端口已被占用：${listeningUrl}。LabHub 未托管该进程；请先结束占用进程后再启动`,
+      );
+    }
+
     const entry = this.ensure(projectId);
+    entry.ownedByHub = true;
     this.appendLog(entry, 'system', `启动：${command}`);
     this.setStatus(entry, 'starting', { error: null, exitCode: null, exitedAt: null });
 
@@ -102,6 +114,7 @@ export class ProcessManager {
     });
     child.on('error', (error) => {
       this.appendLog(entry, 'system', `进程错误：${error.message}`);
+      entry.ownedByHub = false;
       this.setStatus(entry, 'error', { error: error.message, pid: null });
       entry.child = null;
       clearRuntime(projectId);
@@ -119,6 +132,7 @@ export class ProcessManager {
           this.appendLog(entry, 'system', '启动 shell 已退出，但检测到服务仍在监听，保持运行中');
           return;
         }
+        entry.ownedByHub = false;
         entry.runtime.exitedAt = new Date().toISOString();
         entry.runtime.pid = null;
         clearRuntime(projectId);
@@ -148,6 +162,7 @@ export class ProcessManager {
 
     this.setStatus(entry, 'stopping');
     this.appendLog(entry, 'system', '正在停止…');
+    entry.ownedByHub = false;
 
     const pids = new Set<number>();
     if (entry.child?.pid) {
@@ -160,12 +175,28 @@ export class ProcessManager {
     if (persisted?.pid) {
       pids.add(persisted.pid);
     }
+    // pnpm/vite 常会脱离托管 shell，按 openUrl 端口补杀监听进程
+    for (const pid of await findListeningPids(probeUrls)) {
+      pids.add(pid);
+    }
+
+    if (pids.size === 0) {
+      this.appendLog(entry, 'system', '未找到可结束的 PID，仅按端口探测清理状态');
+    } else {
+      this.appendLog(entry, 'system', `结束进程：${[...pids].join(', ')}`);
+    }
 
     for (const pid of pids) {
       await killProcessTree(pid);
     }
 
     await wait(900);
+    // 再扫一轮，避免孙进程立刻顶上端口
+    for (const pid of await findListeningPids(probeUrls)) {
+      await killProcessTree(pid);
+    }
+    await wait(400);
+
     entry.child = null;
     entry.runtime.pid = null;
     entry.runtime.exitedAt = new Date().toISOString();
@@ -173,24 +204,28 @@ export class ProcessManager {
 
     const stillListening = await findListeningUrl(probeUrls);
     if (stillListening) {
+      const leftover = await findListeningPids([stillListening]);
       this.appendLog(
         entry,
         'system',
-        `已结束托管进程，但仍检测到 ${stillListening} 在监听（可能是外部进程）`,
+        `停止后仍检测到 ${stillListening} 在监听${leftover.length ? `（pid ${leftover.join(', ')}）` : ''}`,
       );
-      this.setStatus(entry, 'running', {
-        error: `端口仍被占用：${stillListening}。请手动结束后再点停止，或更换端口`,
+      this.setStatus(entry, 'error', {
+        error: `端口仍被占用：${stillListening}${leftover.length ? ` pid=${leftover.join(',')}` : ''}。可再点一次停止，或手动结束该进程`,
+        pid: leftover[0] ?? null,
       });
-      return this.getRuntime(projectId, probeUrls);
+      // 直接返回，避免 reconcile 把 error 清掉又标成 running
+      return structuredClone(entry.runtime);
     }
 
     this.setStatus(entry, 'stopped', { error: null });
     this.appendLog(entry, 'system', '已停止');
-    return this.getRuntime(projectId, probeUrls);
+    return structuredClone(entry.runtime);
   }
 
   /**
-   * 根据子进程句柄、持久化 PID、端口监听校正真实状态。
+   * 根据本会话托管句柄与端口监听校正状态。
+   * 未由 LabHub 主动启动时，即使端口在听也不标为运行中。
    *
    * @param projectId - 项目 id
    * @param probeUrls - 候选 URL
@@ -205,41 +240,37 @@ export class ProcessManager {
 
     const childPid = entry.child?.pid ?? null;
     if (childPid && isProcessAlive(childPid)) {
+      entry.ownedByHub = true;
       this.setStatus(entry, 'running', { pid: childPid, error: null });
       return entry.runtime;
     }
 
-    const persisted = getPersistedRuntime(projectId);
-    if (persisted?.pid && isProcessAlive(persisted.pid)) {
-      this.setStatus(entry, 'running', {
-        pid: persisted.pid,
-        startedAt: persisted.startedAt,
-        error: null,
-        exitedAt: null,
-      });
-      return entry.runtime;
+    // 仅本会话托管过的项目，才用端口探测确认「shell 已退出但服务仍在」
+    if (entry.ownedByHub) {
+      const listeningUrl = await findListeningUrl(probeUrls);
+      if (listeningUrl) {
+        const listenPids = await findListeningPids([listeningUrl]);
+        this.setStatus(entry, 'running', {
+          pid: listenPids[0] ?? null,
+          error: null,
+          exitedAt: null,
+          startedAt: entry.runtime.startedAt ?? new Date().toISOString(),
+        });
+        if (!entry.logs.some((line) => line.text.includes(listeningUrl))) {
+          this.appendLog(entry, 'system', `端口探测：${listeningUrl} 仍在监听，保持运行中`);
+        }
+        return entry.runtime;
+      }
     }
 
+    const persisted = getPersistedRuntime(projectId);
     if (persisted && (!persisted.pid || !isProcessAlive(persisted.pid))) {
       clearRuntime(projectId);
     }
 
-    const listeningUrl = await findListeningUrl(probeUrls);
-    if (listeningUrl) {
-      this.setStatus(entry, 'running', {
-        pid: entry.runtime.pid && isProcessAlive(entry.runtime.pid) ? entry.runtime.pid : null,
-        error: null,
-        exitedAt: null,
-        startedAt: entry.runtime.startedAt ?? new Date().toISOString(),
-      });
-      if (!entry.logs.some((line) => line.text.includes(listeningUrl))) {
-        this.appendLog(entry, 'system', `端口探测：${listeningUrl} 正在监听，标记为运行中`);
-      }
-      return entry.runtime;
-    }
-
     if (entry.runtime.status === 'running' || entry.runtime.status === 'error') {
       entry.child = null;
+      entry.ownedByHub = false;
       this.setStatus(entry, 'stopped', {
         pid: null,
         error: null,
@@ -261,6 +292,7 @@ export class ProcessManager {
     if (!entry) {
       entry = {
         child: null,
+        ownedByHub: false,
         runtime: {
           status: 'stopped',
           pid: null,

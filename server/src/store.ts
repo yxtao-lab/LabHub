@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalizeProjectRecord } from './profiles.js';
 import type { ProjectRecord } from './types.js';
 import { normalizeTags } from './tags.js';
 
@@ -61,11 +62,13 @@ export function loadProjects(): ProjectRecord[] {
   if (!Array.isArray(raw.projects)) {
     throw new Error('data/projects.json 格式无效：缺少 projects 数组');
   }
-  return raw.projects.map((item) => ({
-    ...item,
-    openUrl: item.openUrl ?? null,
-    tags: normalizeTags(item.tags),
-  }));
+  return raw.projects.map((item) =>
+    normalizeProjectRecord({
+      ...item,
+      openUrl: item.openUrl ?? null,
+      tags: normalizeTags(item.tags),
+    }),
+  );
 }
 
 /**
@@ -97,15 +100,16 @@ export function findProject(id: string): ProjectRecord | undefined {
  * @returns 写入后的记录
  */
 export function upsertProject(record: ProjectRecord): ProjectRecord {
+  const normalized = normalizeProjectRecord(record);
   const projects = loadProjects();
-  const index = projects.findIndex((item) => item.id === record.id);
+  const index = projects.findIndex((item) => item.id === normalized.id);
   if (index >= 0) {
-    projects[index] = record;
+    projects[index] = normalized;
   } else {
-    projects.push(record);
+    projects.push(normalized);
   }
   saveProjects(projects);
-  return record;
+  return normalized;
 }
 
 /**

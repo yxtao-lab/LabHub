@@ -76,6 +76,15 @@ export function clearRuntime(projectId: string): void {
 }
 
 /**
+ * 清空全部持久化运行态（LabHub 进程启动时调用，避免把上次残留误判为已启动）。
+ *
+ * @returns {void}
+ */
+export function clearAllRuntimes(): void {
+  saveRuntimeStore({});
+}
+
+/**
  * 读取单个项目持久化运行态。
  *
  * @param projectId - 项目 id

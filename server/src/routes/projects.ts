@@ -1,10 +1,12 @@
 import { Router } from 'express';
 import { readProjectAnalysis } from '../analysis.js';
-import { processManager } from '../process-manager.js';
+import { ensureMissingAnalyses, generateProjectAnalysis } from '../analysis-generate.js';
 import {
   addProject,
   addProjectSchema,
   deleteProject,
+  getProjectLogs,
+  installProject,
   listProjectViews,
   startProject,
   stopProject,
@@ -13,7 +15,7 @@ import {
   updateProject,
   updateProjectSchema,
 } from '../projects-service.js';
-import { findProject } from '../store.js';
+import { findProject, loadProjects } from '../store.js';
 
 export const projectsRouter = Router();
 
@@ -30,7 +32,20 @@ projectsRouter.get('/', async (_req, res, next) => {
 });
 
 /**
+ * POST /api/projects/analysis/ensure-missing — 批量为缺失项目生成分析
+ */
+projectsRouter.post('/analysis/ensure-missing', (_req, res, next) => {
+  try {
+    const generatedIds = ensureMissingAnalyses(loadProjects());
+    res.json({ generatedIds });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * GET /api/projects/:id/analysis — 项目分析总结 Markdown
+ * 若缺失则自动扫描生成后再返回。
  */
 projectsRouter.get('/:id/analysis', (req, res, next) => {
   try {
@@ -39,8 +54,30 @@ projectsRouter.get('/:id/analysis', (req, res, next) => {
       res.status(404).json({ error: '项目不存在' });
       return;
     }
-    const analysis = readProjectAnalysis(record.path);
-    res.json({ analysis });
+    let analysis = readProjectAnalysis(record.path);
+    let generated = false;
+    if (!analysis.exists) {
+      analysis = generateProjectAnalysis(record, { force: false });
+      generated = true;
+    }
+    res.json({ analysis, generated });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/projects/:id/analysis/generate — 强制重新生成分析总结
+ */
+projectsRouter.post('/:id/analysis/generate', (req, res, next) => {
+  try {
+    const record = findProject(req.params.id);
+    if (!record) {
+      res.status(404).json({ error: '项目不存在' });
+      return;
+    }
+    const analysis = generateProjectAnalysis(record, { force: true });
+    res.json({ analysis, generated: true });
   } catch (error) {
     next(error);
   }
@@ -110,11 +147,13 @@ projectsRouter.delete('/:id', async (req, res, next) => {
 });
 
 /**
- * POST /api/projects/:id/start
+ * POST /api/projects/:id/start — body.profileId 可选
  */
 projectsRouter.post('/:id/start', async (req, res, next) => {
   try {
-    const project = await startProject(req.params.id);
+    const profileId =
+      typeof req.body?.profileId === 'string' ? req.body.profileId : null;
+    const project = await startProject(req.params.id, profileId);
     res.json({ project });
   } catch (error) {
     next(error);
@@ -122,11 +161,25 @@ projectsRouter.post('/:id/start', async (req, res, next) => {
 });
 
 /**
- * POST /api/projects/:id/stop
+ * POST /api/projects/:id/stop — body.profileId 可选；空则停全部
  */
 projectsRouter.post('/:id/stop', async (req, res, next) => {
   try {
-    const project = await stopProject(req.params.id);
+    const profileId =
+      typeof req.body?.profileId === 'string' ? req.body.profileId : null;
+    const project = await stopProject(req.params.id, profileId);
+    res.json({ project });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/projects/:id/install — 执行 installCommand
+ */
+projectsRouter.post('/:id/install', async (req, res, next) => {
+  try {
+    const project = await installProject(req.params.id);
     res.json({ project });
   } catch (error) {
     next(error);
@@ -146,9 +199,15 @@ projectsRouter.post('/:id/sync', async (req, res, next) => {
 });
 
 /**
- * GET /api/projects/:id/logs
+ * GET /api/projects/:id/logs?profileId=&limit=
  */
-projectsRouter.get('/:id/logs', (req, res) => {
-  const limit = Number(req.query.limit ?? 200);
-  res.json({ logs: processManager.getLogs(req.params.id, limit) });
+projectsRouter.get('/:id/logs', (req, res, next) => {
+  try {
+    const limit = Number(req.query.limit ?? 200);
+    const profileId =
+      typeof req.query.profileId === 'string' ? req.query.profileId : null;
+    res.json({ logs: getProjectLogs(req.params.id, profileId, limit) });
+  } catch (error) {
+    next(error);
+  }
 });

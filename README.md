@@ -8,30 +8,68 @@ FreeLLMAPI 只是被管理的项目之一，不是中枢本身。
 1. **提供 GitHub / Gitee 地址** → 浅克隆到 `projects/<id>/` 并登记  
 2. **改代码、提交** → 在对应项目目录里正常 `git commit` / `git push origin`，推回**该项目源仓库**  
 3. **管理控制台** → 多端启动模式分启停、运行状态、PID、日志监控；可配置研发分期（P0/P1…）  
-4. **项目分析总结** → 读取各仓 `docs/项目分析总结.md` 并在控制台「分析总结」页展示  
+4. **Cloud 账号** → 手机号注册（短信验证 + 密码）；登录可用密码或验证码；默认每用户管理 3 个项目；注册填邀请码则双方额度各 +1  
+5. **项目分析总结** → 已登录用户首次托管时经 Cloud（DeepSeek）生成分析；按账号月配额限流；Key 只在 Cloud 服务器  
 
 ## 目录结构
 
 ```text
-labhub/                 ← 主体（本仓库）
-  server/               ← 管理 API :8790
-  client/               ← 控制台 UI :5177
-  projects/             ← 托管克隆（gitignore，各自独立 .git）
-  data/projects.json    ← 登记清单
+labhub/
+  server/                 ← 本机管理 API :8790
+  client/                 ← 控制台 UI :5177
+  services/cloud/         ← LabHub Cloud（维护者部署：账号/清单/AI）
+  config/public.json      ← 可公开的 cloudUrl（非密钥）
+  projects/               ← 托管克隆（gitignore）
+  data/                   ← 本机清单与登录态（gitignore）
 ```
 
-## 快速开始
+## 快速开始（普通用户）
 
 ```bash
 cd E:\Desktop\TYX\AI\labhub
 npm install
-npm run seed:demo    # 克隆/登记 freellmapi 与 edgetunnel 到 projects/
-npm run dev          # 仅启动 LabHub API + 控制台；不会自动启动托管项目
+npm run dev
 ```
 
-打开 http://127.0.0.1:5177  
+打开 http://127.0.0.1:5177 → **注册/登录**后使用管理功能。
 
-托管项目需在控制台按需点「启动」；LabHub 重启后也不会自动拉起它们。
+- 注册：手机号 + 密码 + 短信验证码（邀请码可选）
+- 登录：手机号 + 密码，或手机号 + 验证码
+- 默认可管理 **3** 个项目；使用他人邀请码注册时，你与邀请人各 **+1**
+
+无需配置 DeepSeek Token。
+
+### 维护者：部署 LabHub Cloud
+
+```bash
+cd services/cloud
+cp .env.example .env
+# 必填：JWT_SECRET
+# 可选：INVITE_CODE（用户填写时才校验）
+# 开发：SMS_PROVIDER=dev、SMS_DEV_CODE=123456（验证码打日志）
+# 生产：DEEPSEEK_API_KEY + SMS_PROVIDER=aliyun 及短信密钥
+npm install
+npm run dev   # 默认 :8780
+```
+
+把 Cloud 公网地址写入仓库根 [`config/public.json`](config/public.json)：
+
+```json
+{
+  "cloudUrl": "https://你的-cloud-域名"
+}
+```
+
+本地联调默认已是 `http://127.0.0.1:8780`。详见 [`services/cloud/README.md`](services/cloud/README.md)。
+
+| 角色 | Token / 密钥 |
+|------|----------------|
+| 普通用户 | 无 DeepSeek Token；须手机号登录；邀请码可选 |
+| Cloud 服务器 | `DEEPSEEK_API_KEY`、短信 AccessKey、`JWT_SECRET`、`INVITE_CODE` |
+
+- AI 触发：仅「第一次被 LabHub 管理」且已登录且有配额  
+- 启动补缺 / 控制台「本地重生成」：不调 AI  
+- 云端只存清单元数据，**不上传源码**
 
 ### 添加任意仓库
 
@@ -46,13 +84,13 @@ curl -X POST http://127.0.0.1:8790/api/projects \
 ### 提交回源仓库
 
 ```bash
-cd projects/某项目          # 如 projects/freellmapi
+cd projects/某项目
 git add .
 git commit -m "feat: ..."
-git push origin HEAD        # 推到添加时填写的 repoUrl
+git push origin HEAD
 ```
 
 ## 与旧方案的区别
 
 此前误把 Hub 做进 FreeLLMAPI 仓库内部——已纠正。  
-正确模型：**LabHub 管一切；FreeLLMAPI / EdgeTunnel / 其它仓都是子项目。**
+正确模型：**LabHub 管一切；业务仓都是子项目。** Cloud 只同步「管了哪些仓」，不替代各仓自己的 git 远程。

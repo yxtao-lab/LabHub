@@ -4,6 +4,8 @@ import { ensureMissingAnalyses, generateProjectAnalysis } from '../analysis-gene
 import {
   addProject,
   addProjectSchema,
+  buildProject,
+  clearProjectLogs,
   deleteProject,
   getProjectLogs,
   installProject,
@@ -45,7 +47,7 @@ projectsRouter.post('/analysis/ensure-missing', (_req, res, next) => {
 
 /**
  * GET /api/projects/:id/analysis — 项目分析总结 Markdown
- * 若缺失则自动扫描生成后再返回。
+ * 若缺失则用本地启发式补全（不调用 DeepSeek；AI 仅在首次托管时触发）。
  */
 projectsRouter.get('/:id/analysis', (req, res, next) => {
   try {
@@ -67,7 +69,7 @@ projectsRouter.get('/:id/analysis', (req, res, next) => {
 });
 
 /**
- * POST /api/projects/:id/analysis/generate — 强制重新生成分析总结
+ * POST /api/projects/:id/analysis/generate — 强制本地启发式重生成（非 DeepSeek）
  */
 projectsRouter.post('/:id/analysis/generate', (req, res, next) => {
   try {
@@ -77,7 +79,7 @@ projectsRouter.post('/:id/analysis/generate', (req, res, next) => {
       return;
     }
     const analysis = generateProjectAnalysis(record, { force: true });
-    res.json({ analysis, generated: true });
+    res.json({ analysis, generated: true, source: 'heuristic' });
   } catch (error) {
     next(error);
   }
@@ -187,6 +189,20 @@ projectsRouter.post('/:id/install', async (req, res, next) => {
 });
 
 /**
+ * POST /api/projects/:id/build — body.profileId 可选，对应 buildProfiles
+ */
+projectsRouter.post('/:id/build', async (req, res, next) => {
+  try {
+    const profileId =
+      typeof req.body?.profileId === 'string' ? req.body.profileId : null;
+    const project = await buildProject(req.params.id, profileId);
+    res.json({ project });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * POST /api/projects/:id/sync — git fetch/merge origin
  */
 projectsRouter.post('/:id/sync', async (req, res, next) => {
@@ -207,6 +223,21 @@ projectsRouter.get('/:id/logs', (req, res, next) => {
     const profileId =
       typeof req.query.profileId === 'string' ? req.query.profileId : null;
     res.json({ logs: getProjectLogs(req.params.id, profileId, limit) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * DELETE /api/projects/:id/logs?profileId=
+ * 清空日志缓冲；未传 profileId 时清空该项目全部模式/构建/安装日志。
+ */
+projectsRouter.delete('/:id/logs', (req, res, next) => {
+  try {
+    const profileId =
+      typeof req.query.profileId === 'string' ? req.query.profileId : null;
+    clearProjectLogs(req.params.id, profileId);
+    res.json({ ok: true, logs: [] });
   } catch (error) {
     next(error);
   }

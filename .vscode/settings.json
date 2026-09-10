@@ -1,0 +1,5 @@
+{
+  "git.autoRepositoryDetection": true,
+  "git.repositoryScanMaxDepth": 2,
+  "git.repositoryScanIgnoredFolders": ["node_modules", "dist", ".git"]
+}

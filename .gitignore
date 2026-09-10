@@ -8,7 +8,12 @@ projects/*
 *.db
 *.db-wal
 *.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
 .DS_Store
 *.log
 client/dist/
 server/dist/
+services/cloud/data/
+services/analysis-relay/data/

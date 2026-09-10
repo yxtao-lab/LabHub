@@ -3,7 +3,9 @@ import path from 'node:path';
 import { z } from 'zod';
 import { spawn } from 'node:child_process';
 import { hasProjectAnalysis } from './analysis.js';
-import { generateProjectAnalysis } from './analysis-generate.js';
+import { generateAnalysisOnFirstManage } from './analysis-deepseek.js';
+import { pushCatalogIfLoggedIn } from './catalog-sync.js';
+import { cloudFetchMe } from './cloud-client.js';
 import {
   cloneRepository,
   deriveProjectId,
@@ -17,8 +19,14 @@ import { openBrowserWhenReady } from './open-browser.js';
 import { processManager } from './process-manager.js';
 import {
   DEFAULT_PROFILE_ID,
+  buildRuntimeKey,
+  findBuildProfile,
   findStartProfile,
+  isBuildRuntimeProfileId,
   normalizeProjectRecord,
+  parseBuildProfileId,
+  resolveBuildProfiles,
+  resolveDefaultBuildProfileId,
   resolveDefaultProfileId,
   resolvePhases,
   resolveStartProfiles,
@@ -34,6 +42,7 @@ import {
 } from './store.js';
 import { normalizeTags } from './tags.js';
 import type {
+  BuildProfile,
   LogLine,
   ProfileRuntimeView,
   ProjectRecord,
@@ -54,6 +63,14 @@ const startProfileSchema = z.object({
   openUrl: z.string().url().nullable().optional(),
   cwd: z.string().nullable().optional(),
   phase: z.string().nullable().optional(),
+  description: z.string().optional(),
+});
+
+const buildProfileSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  command: z.string().min(1),
+  cwd: z.string().nullable().optional(),
   description: z.string().optional(),
 });
 
@@ -80,6 +97,8 @@ export const addProjectSchema = z.object({
   skipInstall: z.boolean().default(false),
   startProfiles: z.array(startProfileSchema).optional(),
   defaultProfileId: z.string().nullable().optional(),
+  buildProfiles: z.array(buildProfileSchema).optional(),
+  defaultBuildProfileId: z.string().nullable().optional(),
   phases: z.array(phaseSchema).optional(),
   currentPhase: z.string().nullable().optional(),
 });
@@ -95,6 +114,8 @@ export const updateProjectSchema = z.object({
   branch: z.string().min(1).optional(),
   startProfiles: z.array(startProfileSchema).optional(),
   defaultProfileId: z.string().nullable().optional(),
+  buildProfiles: z.array(buildProfileSchema).optional(),
+  defaultBuildProfileId: z.string().nullable().optional(),
   phases: z.array(phaseSchema).optional(),
   currentPhase: z.string().nullable().optional(),
 });
@@ -146,7 +167,10 @@ function aggregateRuntime(views: ProfileRuntimeView[]): RuntimeState {
  * @returns 绝对 cwd
  * @throws {Error} 目录不存在或越界时抛出
  */
-function resolveProfileCwd(projectRoot: string, profile: StartProfile): string {
+function resolveProfileCwd(
+  projectRoot: string,
+  profile: { cwd?: string | null },
+): string {
   const root = path.resolve(projectRoot);
   if (!profile.cwd) {
     return root;
@@ -154,10 +178,10 @@ function resolveProfileCwd(projectRoot: string, profile: StartProfile): string {
   const target = path.resolve(root, profile.cwd);
   const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
   if (target !== root && !target.startsWith(rootWithSep)) {
-    throw new Error(`启动模式 cwd 越界：${profile.cwd}`);
+    throw new Error(`工作目录 cwd 越界：${profile.cwd}`);
   }
   if (!fs.existsSync(target)) {
-    throw new Error(`启动模式工作目录不存在：${target}`);
+    throw new Error(`工作目录不存在：${target}`);
   }
   return target;
 }
@@ -176,6 +200,8 @@ export async function toProjectView(record: ProjectRecord): Promise<ProjectView>
   const git = gitRepo ? await readGitSummary(absolutePath) : null;
   const startProfiles = resolveStartProfiles(normalized);
   const defaultProfileId = resolveDefaultProfileId(normalized, startProfiles);
+  const buildProfiles = resolveBuildProfiles(normalized);
+  const defaultBuildProfileId = resolveDefaultBuildProfileId(normalized, buildProfiles);
 
   const profileRuntimes: ProfileRuntimeView[] = [];
   const allUrls: string[] = [];
@@ -216,6 +242,8 @@ export async function toProjectView(record: ProjectRecord): Promise<ProjectView>
     hasAnalysis: hasProjectAnalysis(normalized.path),
     startProfiles,
     defaultProfileId,
+    buildProfiles,
+    defaultBuildProfileId,
     phases: resolvePhases(normalized),
     currentPhase: normalized.currentPhase ?? null,
   };
@@ -241,6 +269,16 @@ export async function listProjectViews(): Promise<ProjectView[]> {
 export async function addProject(
   input: z.infer<typeof addProjectSchema>,
 ): Promise<ProjectView> {
+  const me = await cloudFetchMe();
+  if (me?.projectLimit != null) {
+    const currentCount = loadProjects().length;
+    if (currentCount >= me.projectLimit) {
+      throw new Error(
+        `已达项目管理上限（${me.projectLimit} 个）。可通过邀请好友注册提升额度（双方各 +1）`,
+      );
+    }
+  }
+
   const id = sanitizeId(input.id ?? deriveProjectId(input.repoUrl));
   if (findProject(id)) {
     throw new Error(`项目 id 已存在：${id}`);
@@ -293,15 +331,18 @@ export async function addProject(
     notes: input.notes ?? '',
     startProfiles: input.startProfiles,
     defaultProfileId: input.defaultProfileId ?? null,
+    buildProfiles: input.buildProfiles,
+    defaultBuildProfileId: input.defaultBuildProfileId ?? null,
     phases: input.phases,
     currentPhase: input.currentPhase ?? null,
   });
   upsertProject(record);
   try {
-    generateProjectAnalysis(record, { force: false });
-  } catch {
-    // 分析生成失败不阻断登记
+    await generateAnalysisOnFirstManage(record);
+  } catch (error) {
+    console.warn('[labhub] 首次托管分析失败（不阻断登记）', error);
   }
+  await pushCatalogIfLoggedIn();
   return toProjectView(record);
 }
 
@@ -328,6 +369,7 @@ export async function updateProject(
     updatedAt: new Date().toISOString(),
   });
   upsertProject(next);
+  await pushCatalogIfLoggedIn();
   return toProjectView(next);
 }
 
@@ -357,6 +399,7 @@ export async function deleteProject(id: string, deleteFiles = false): Promise<vo
       fs.rmSync(normalized, { recursive: true, force: true });
     }
   }
+  await pushCatalogIfLoggedIn();
 }
 
 /**
@@ -459,10 +502,41 @@ export async function installProject(id: string): Promise<ProjectView> {
 }
 
 /**
+ * 按构建目标执行 build（如 pnpm build:packages）。
+ *
+ * @param id - 项目 id
+ * @param buildProfileId - 构建目标 id；空则用默认
+ * @returns 视图
+ * @throws {Error} 项目/目标不存在或启动失败时抛出
+ */
+export async function buildProject(
+  id: string,
+  buildProfileId?: string | null,
+): Promise<ProjectView> {
+  const current = findProject(id);
+  if (!current) {
+    throw new Error(`项目不存在：${id}`);
+  }
+  const absolutePath = resolveProjectPath(current.path);
+  if (!fs.existsSync(absolutePath)) {
+    throw new Error(`项目目录不存在：${absolutePath}`);
+  }
+  const profiles = resolveBuildProfiles(current);
+  const profile = findBuildProfile(
+    profiles,
+    buildProfileId || resolveDefaultBuildProfileId(current, profiles),
+  );
+  const cwd = resolveProfileCwd(absolutePath, profile);
+  const key = buildRuntimeKey(id, profile.id);
+  await processManager.start(key, cwd, profile.command, []);
+  return toProjectView(current);
+}
+
+/**
  * 读取某模式（或全部）日志。
  *
  * @param id - 项目 id
- * @param profileId - 模式 id；空则合并全部
+ * @param profileId - 启动模式 id；或以 `build:` 前缀表示构建目标；空则合并全部
  * @param limit - 条数
  * @returns 日志行
  */
@@ -475,13 +549,26 @@ export function getProjectLogs(
   if (!current) {
     throw new Error(`项目不存在：${id}`);
   }
-  const profiles = resolveStartProfiles(current);
+  const startProfiles = resolveStartProfiles(current);
+  const buildProfiles = resolveBuildProfiles(current);
+
   if (profileId) {
-    findStartProfile(profiles, profileId);
+    if (profileId.startsWith('build:')) {
+      const buildId = profileId.slice('build:'.length);
+      const profile = findBuildProfile(buildProfiles, buildId);
+      return processManager.getLogs(buildRuntimeKey(id, profile.id), limit);
+    }
+    if (isBuildRuntimeProfileId(profileId)) {
+      const buildId = parseBuildProfileId(profileId);
+      const profile = findBuildProfile(buildProfiles, buildId);
+      return processManager.getLogs(buildRuntimeKey(id, profile.id), limit);
+    }
+    findStartProfile(startProfiles, profileId);
     return processManager.getLogs(runtimeKey(id, profileId), limit);
   }
+
   const merged = [
-    ...profiles.flatMap((profile) =>
+    ...startProfiles.flatMap((profile) =>
       processManager.getLogs(runtimeKey(id, profile.id), limit).map((line) => ({
         ...line,
         text: `[${profile.name}] ${line.text}`,
@@ -491,9 +578,60 @@ export function getProjectLogs(
       ...line,
       text: `[安装依赖] ${line.text}`,
     })),
+    ...buildProfiles.flatMap((profile) =>
+      processManager.getLogs(buildRuntimeKey(id, profile.id), limit).map((line) => ({
+        ...line,
+        text: `[构建:${profile.name}] ${line.text}`,
+      })),
+    ),
   ];
   merged.sort((a, b) => a.ts.localeCompare(b.ts));
   return merged.slice(-limit);
+}
+
+/**
+ * 清空某模式（或全部）日志缓冲；不影响进程运行。
+ *
+ * @param id - 项目 id
+ * @param profileId - 启动模式 id；或以 `build:` 前缀表示构建目标；空则清空全部相关缓冲
+ * @returns void
+ */
+export function clearProjectLogs(
+  id: string,
+  profileId: string | null | undefined,
+): void {
+  const current = findProject(id);
+  if (!current) {
+    throw new Error(`项目不存在：${id}`);
+  }
+  const startProfiles = resolveStartProfiles(current);
+  const buildProfiles = resolveBuildProfiles(current);
+
+  if (profileId) {
+    if (profileId.startsWith('build:')) {
+      const buildId = profileId.slice('build:'.length);
+      const profile = findBuildProfile(buildProfiles, buildId);
+      processManager.clearLogs(buildRuntimeKey(id, profile.id));
+      return;
+    }
+    if (isBuildRuntimeProfileId(profileId)) {
+      const buildId = parseBuildProfileId(profileId);
+      const profile = findBuildProfile(buildProfiles, buildId);
+      processManager.clearLogs(buildRuntimeKey(id, profile.id));
+      return;
+    }
+    findStartProfile(startProfiles, profileId);
+    processManager.clearLogs(runtimeKey(id, profileId));
+    return;
+  }
+
+  for (const profile of startProfiles) {
+    processManager.clearLogs(runtimeKey(id, profile.id));
+  }
+  processManager.clearLogs(runtimeKey(id, '__install__'));
+  for (const profile of buildProfiles) {
+    processManager.clearLogs(buildRuntimeKey(id, profile.id));
+  }
 }
 
 /**

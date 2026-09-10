@@ -9,6 +9,26 @@ import type { LogLine, RuntimeState, RuntimeStatus } from './types.js';
 
 const MAX_LOG_LINES = 500;
 
+/** Chromium / Electron DevTools 常见无害噪音（不进运行日志） */
+const NOISE_LOG_PATTERNS = [
+  /Autofill\.(enable|setAddresses) failed/i,
+  /ERROR:CONSOLE\(\d+\)\].*'Autofill\./i,
+];
+
+/**
+ * 判断是否为应丢弃的噪音日志行。
+ *
+ * @param stream - 流类型
+ * @param line - 单行文本
+ * @returns 是否忽略
+ */
+function isNoiseLogLine(stream: LogLine['stream'], line: string): boolean {
+  if (stream !== 'stderr' && stream !== 'stdout') {
+    return false;
+  }
+  return NOISE_LOG_PATTERNS.some((pattern) => pattern.test(line));
+}
+
 type ManagedProcess = {
   child: ChildProcess | null;
   /** 本 LabHub 进程内是否由控制台主动 start 过（重启后为 false） */
@@ -48,6 +68,20 @@ export class ProcessManager {
   getLogs(projectId: string, limit = 200): LogLine[] {
     const entry = this.ensure(projectId);
     return entry.logs.slice(-limit);
+  }
+
+  /**
+   * 清空指定运行时键的日志缓冲（进程本身不受影响）。
+   *
+   * @param projectId - 运行时键（项目/模式/构建）
+   * @returns void
+   */
+  clearLogs(projectId: string): void {
+    const entry = this.processes.get(projectId);
+    if (!entry) {
+      return;
+    }
+    entry.logs = [];
   }
 
   /**
@@ -337,6 +371,9 @@ export class ProcessManager {
     const lines = text.replace(/\r\n/g, '\n').split('\n');
     for (const line of lines) {
       if (!line) {
+        continue;
+      }
+      if (isNoiseLogLine(stream, line)) {
         continue;
       }
       entry.logs.push({ ts, stream, text: line });

@@ -1,6 +1,8 @@
 import path from 'node:path';
 import cors from 'cors';
 import express, { type ErrorRequestHandler } from 'express';
+import { requireLocalLogin } from './require-auth.js';
+import { authRouter } from './routes/auth.js';
 import { projectsRouter } from './routes/projects.js';
 import { ROOT_DIR } from './store.js';
 
@@ -18,7 +20,8 @@ export function createApp() {
     res.json({ ok: true, name: 'labhub', root: ROOT_DIR });
   });
 
-  app.use('/api/projects', projectsRouter);
+  app.use('/api/auth', authRouter);
+  app.use('/api/projects', requireLocalLogin, projectsRouter);
 
   const clientDist = path.join(ROOT_DIR, 'client', 'dist');
   app.use(express.static(clientDist));
@@ -31,7 +34,8 @@ export function createApp() {
   const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
     const message = error instanceof Error ? error.message : String(error);
     console.error('[labhub]', message);
-    res.status(400).json({ error: message });
+    const status = (error as { status?: number }).status;
+    res.status(typeof status === 'number' && status >= 400 ? status : 400).json({ error: message });
   };
   app.use(errorHandler);
 

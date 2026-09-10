@@ -1,0 +1,27 @@
+{
+  "name": "@labhub/analysis-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "LabHub 项目分析中继：仅本服务持有 DeepSeek API Key，对 LabHub 实例提供分析 API",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.2",
+    "@types/node": "^22.15.3",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20.18.0"
+  }
+}

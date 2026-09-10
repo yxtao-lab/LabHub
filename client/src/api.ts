@@ -16,6 +16,14 @@ export type StartProfile = {
   description?: string;
 };
 
+export type BuildProfile = {
+  id: string;
+  name: string;
+  command: string;
+  cwd?: string | null;
+  description?: string;
+};
+
 export type ProjectPhase = {
   id: string;
   name: string;
@@ -69,7 +77,9 @@ export type Project = {
   };
   profileRuntimes: ProfileRuntimeView[];
   startProfiles: StartProfile[];
+  buildProfiles: BuildProfile[];
   defaultProfileId: string;
+  defaultBuildProfileId: string;
   phases: ProjectPhase[];
   currentPhase: string | null;
   recentLogs: LogLine[];

@@ -42,9 +42,45 @@ const projects = ref<Project[]>([]);
 const selectedId = ref<string | null>(null);
 const logs = ref<LogLine[]>([]);
 const logProfileId = ref<string | null>(null);
+const buildProfileId = ref<string>('');
 const error = ref<string | null>(null);
 const busy = ref(false);
 const showAdd = ref(false);
+/** 开发环境预填的 Cloud 测试账号（与 services/cloud 启动种子一致） */
+const DEV_TEST_PHONE = '13800138000';
+const DEV_TEST_PASSWORD = 'labhub123';
+const isDevClient = import.meta.env.DEV;
+
+const authMode = ref<'login' | 'register'>('login');
+const loginMethod = ref<'password' | 'sms'>('password');
+const authPhone = ref(isDevClient ? DEV_TEST_PHONE : '');
+const authPassword = ref(isDevClient ? DEV_TEST_PASSWORD : '');
+const authPassword2 = ref('');
+const authCode = ref('');
+const authInvite = ref('');
+const authAgreed = ref(isDevClient);
+const smsCooldown = ref(0);
+let smsTimer: number | undefined;
+
+type CloudUser = {
+  id: string;
+  phoneMasked: string;
+  inviteCode?: string;
+  projectLimit?: number;
+  projectCount?: number;
+  projectRemaining?: number;
+  aiQuota: {
+    month: string;
+    limit: number;
+    used: number;
+    remaining: number;
+  } | null;
+};
+
+const cloudUrl = ref<string | null>(null);
+const authUser = ref<CloudUser | null>(null);
+const authLoggedIn = ref(false);
+const authReady = ref(false);
 const repoUrl = ref('');
 const startCommand = ref('npm run dev');
 const branch = ref('main');
@@ -226,6 +262,189 @@ const runningCount = computed(
   () => projects.value.filter((item) => item.runtime.status === 'running').length,
 );
 
+const missingProjects = computed(() => projects.value.filter((item) => !item.exists));
+
+/**
+ * 刷新 Cloud 登录态。
+ *
+ * @returns {Promise<void>}
+ */
+async function refreshAuth(): Promise<void> {
+  try {
+    const data = await api<{
+      cloudUrl: string | null;
+      loggedIn: boolean;
+      user: CloudUser | null;
+    }>('/api/auth/status');
+    cloudUrl.value = data.cloudUrl;
+    authLoggedIn.value = data.loggedIn;
+    authUser.value = data.user;
+  } catch {
+    authLoggedIn.value = false;
+    authUser.value = null;
+  } finally {
+    authReady.value = true;
+  }
+}
+
+/**
+ * 登录成功后进入控制台。
+ *
+ * @param user - 用户
+ * @returns {Promise<void>}
+ */
+async function enterAfterAuth(user: CloudUser): Promise<void> {
+  authLoggedIn.value = true;
+  authUser.value = user;
+  authCode.value = '';
+  authPassword.value = '';
+  authPassword2.value = '';
+  error.value = null;
+  await refresh();
+  await refreshAuth();
+  if (projectsTimer === undefined) {
+    projectsTimer = window.setInterval(() => void refresh(true), 3000);
+  }
+}
+
+/**
+ * 发送短信验证码。
+ *
+ * @returns {Promise<void>}
+ */
+async function sendSmsCode(): Promise<void> {
+  await runAction(async () => {
+    await api('/api/auth/sms/send', {
+      method: 'POST',
+      body: JSON.stringify({ phone: authPhone.value }),
+    });
+    smsCooldown.value = 60;
+    if (smsTimer !== undefined) {
+      window.clearInterval(smsTimer);
+    }
+    smsTimer = window.setInterval(() => {
+      smsCooldown.value -= 1;
+      if (smsCooldown.value <= 0 && smsTimer !== undefined) {
+        window.clearInterval(smsTimer);
+        smsTimer = undefined;
+      }
+    }, 1000);
+  });
+}
+
+/**
+ * 提交登录或注册。
+ *
+ * @returns {Promise<void>}
+ */
+async function submitAuth(): Promise<void> {
+  await runAction(async () => {
+    if (!authAgreed.value) {
+      throw new Error('请先勾选同意服务条款和隐私协议');
+    }
+    if (authMode.value === 'register') {
+      if (authPassword.value !== authPassword2.value) {
+        throw new Error('两次输入的密码不一致');
+      }
+      const data = await api<{ user: CloudUser }>('/api/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({
+          phone: authPhone.value,
+          password: authPassword.value,
+          code: authCode.value,
+          inviteCode: authInvite.value.trim() || undefined,
+        }),
+      });
+      await enterAfterAuth(data.user);
+      return;
+    }
+
+    if (loginMethod.value === 'password') {
+      const data = await api<{ user: CloudUser }>('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({
+          phone: authPhone.value,
+          password: authPassword.value,
+        }),
+      });
+      await enterAfterAuth(data.user);
+      return;
+    }
+
+    const data = await api<{ user: CloudUser }>('/api/auth/sms/verify', {
+      method: 'POST',
+      body: JSON.stringify({
+        phone: authPhone.value,
+        code: authCode.value,
+      }),
+    });
+    await enterAfterAuth(data.user);
+  });
+}
+
+/**
+ * 退出登录。
+ *
+ * @returns {Promise<void>}
+ */
+async function logout(): Promise<void> {
+  await runAction(async () => {
+    await api('/api/auth/logout', { method: 'POST', body: '{}' });
+    authLoggedIn.value = false;
+    authUser.value = null;
+    projects.value = [];
+    selectedId.value = null;
+    authMode.value = 'login';
+    loginMethod.value = 'password';
+    if (isDevClient) {
+      authPhone.value = DEV_TEST_PHONE;
+      authPassword.value = DEV_TEST_PASSWORD;
+      authAgreed.value = true;
+    } else {
+      authPhone.value = '';
+      authPassword.value = '';
+      authAgreed.value = false;
+    }
+    authPassword2.value = '';
+    authCode.value = '';
+    if (projectsTimer !== undefined) {
+      window.clearInterval(projectsTimer);
+      projectsTimer = undefined;
+    }
+  });
+}
+
+/**
+ * 批量恢复本地缺失的托管目录。
+ *
+ * @returns {Promise<void>}
+ */
+async function restoreMissing(): Promise<void> {
+  await runAction(async () => {
+    const data = await api<{ restored: string[]; failed: Array<{ id: string; error: string }> }>(
+      '/api/auth/restore-missing',
+      { method: 'POST', body: '{}' },
+    );
+    await refresh();
+    if (data.failed.length > 0) {
+      error.value = `部分恢复失败：${data.failed.map((item) => `${item.id}(${item.error})`).join('；')}`;
+    }
+  });
+}
+
+/**
+ * 恢复单个缺失项目。
+ *
+ * @param id - 项目 id
+ * @returns {Promise<void>}
+ */
+async function restoreOne(id: string): Promise<void> {
+  await runAction(async () => {
+    await api(`/api/auth/restore/${id}`, { method: 'POST', body: '{}' });
+    await refresh();
+  });
+}
+
 const projectNameOptions = computed(() =>
   [...projects.value]
     .map((item) => ({ id: item.id, name: item.name }))
@@ -323,6 +542,27 @@ async function refreshLogs(id: string): Promise<void> {
 }
 
 /**
+ * 清空当前筛选范围下的运行日志缓冲（不影响进程）。
+ *
+ * @returns {Promise<void>}
+ */
+async function clearLogs(): Promise<void> {
+  const id = selectedId.value;
+  if (!id) {
+    return;
+  }
+  await runAction(async () => {
+    const query = new URLSearchParams();
+    if (logProfileId.value) {
+      query.set('profileId', logProfileId.value);
+    }
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    await api(`/api/projects/${id}/logs${suffix}`, { method: 'DELETE' });
+    logs.value = [];
+  });
+}
+
+/**
  * 拉取选中项目的分析总结，并渲染为 HTML。
  *
  * @param id - 项目 id
@@ -353,7 +593,7 @@ async function refreshAnalysis(id: string): Promise<void> {
 }
 
 /**
- * 强制重新扫描生成选中项目的分析总结。
+ * 用本地启发式强制重生成分析总结（不调用 DeepSeek；AI 仅在首次托管时触发）。
  *
  * @returns {Promise<void>}
  */
@@ -449,6 +689,49 @@ async function installSelected(): Promise<void> {
     await api(`/api/projects/${id}/install`, { method: 'POST' });
   });
   void refreshLogs(id);
+}
+
+/**
+ * 按所选构建目标执行 build。
+ *
+ * @param profileId - 可选构建目标 id；空则用当前下拉值 / 默认
+ * @returns {Promise<void>}
+ */
+async function buildSelected(profileId?: string | null): Promise<void> {
+  if (!selected.value) {
+    return;
+  }
+  const id = selected.value.id;
+  const targetId =
+    profileId ||
+    buildProfileId.value ||
+    selected.value.defaultBuildProfileId ||
+    selected.value.buildProfiles?.[0]?.id ||
+    '';
+  if (!targetId) {
+    error.value = '没有可用的构建目标';
+    return;
+  }
+  buildProfileId.value = targetId;
+  logProfileId.value = `build:${targetId}`;
+  detailTab.value = 'logs';
+  await runAction(async () => {
+    await api(`/api/projects/${id}/build`, {
+      method: 'POST',
+      body: JSON.stringify({ profileId: targetId }),
+    });
+  });
+  void refreshLogs(id);
+}
+
+/**
+ * 构建目标下拉变更。
+ *
+ * @param event - change 事件
+ * @returns {void}
+ */
+function onBuildProfileChange(event: Event): void {
+  buildProfileId.value = (event.target as HTMLSelectElement).value;
 }
 
 /**
@@ -673,8 +956,13 @@ function phaseLabel(status: ProjectPhase['status']): string {
 }
 
 onMounted(() => {
-  void refresh();
-  projectsTimer = window.setInterval(() => void refresh(true), 3000);
+  void (async () => {
+    await refreshAuth();
+    if (authLoggedIn.value) {
+      await refresh();
+      projectsTimer = window.setInterval(() => void refresh(true), 3000);
+    }
+  })();
 });
 
 onUnmounted(() => {
@@ -683,6 +971,9 @@ onUnmounted(() => {
   }
   if (logsTimer !== undefined) {
     window.clearInterval(logsTimer);
+  }
+  if (smsTimer !== undefined) {
+    window.clearInterval(smsTimer);
   }
 });
 
@@ -704,6 +995,8 @@ watch(
     }
     const project = projects.value.find((item) => item.id === id);
     tagsDraft.value = (project?.tags ?? []).join(', ');
+    buildProfileId.value =
+      project?.defaultBuildProfileId || project?.buildProfiles?.[0]?.id || '';
     detailTab.value = project?.hasAnalysis ? 'analysis' : 'logs';
     void refreshLogs(id);
     void refreshAnalysis(id);
@@ -721,6 +1014,191 @@ watch(logProfileId, () => {
 
 <template>
   <div class="flex h-full min-h-0 flex-col">
+    <div
+      v-if="!authReady"
+      class="flex flex-1 items-center justify-center text-sm text-[var(--muted)]"
+    >
+      正在检查登录态…
+    </div>
+
+    <div
+      v-else-if="!authLoggedIn"
+      class="flex flex-1 items-center justify-center bg-[radial-gradient(ellipse_at_top,_#152033_0%,_#0b1016_55%)] p-4"
+    >
+      <form
+        class="w-full max-w-md rounded-xl border border-[var(--line)] bg-[var(--panel)] p-6 shadow-2xl"
+        @submit.prevent="submitAuth"
+      >
+        <h1 class="text-center text-xl font-semibold tracking-tight">LabHub</h1>
+        <p
+          v-if="isDevClient"
+          class="mt-2 text-center text-xs text-[var(--muted)]"
+        >
+          开发环境已预填测试账号 {{ DEV_TEST_PHONE }} / {{ DEV_TEST_PASSWORD }}
+        </p>
+        <p v-if="!cloudUrl" class="mt-3 rounded border border-[var(--danger)]/40 bg-[#3a2220] px-3 py-2 text-xs text-[var(--danger)]">
+          未配置 Cloud 地址（config/public.json 的 cloudUrl）。请先启动 LabHub Cloud。
+        </p>
+
+        <div
+          v-if="authMode === 'login'"
+          class="mt-5 grid grid-cols-2 gap-2 rounded-lg border border-[var(--line)] p-1 text-sm"
+        >
+          <button
+            type="button"
+            class="rounded-md px-2 py-1.5"
+            :class="loginMethod === 'password' ? 'bg-[var(--accent)] font-semibold text-[#06221f]' : 'text-[var(--muted)]'"
+            @click="loginMethod = 'password'"
+          >
+            密码登录
+          </button>
+          <button
+            type="button"
+            class="rounded-md px-2 py-1.5"
+            :class="loginMethod === 'sms' ? 'bg-[var(--accent)] font-semibold text-[#06221f]' : 'text-[var(--muted)]'"
+            @click="loginMethod = 'sms'"
+          >
+            验证码登录
+          </button>
+        </div>
+
+        <label class="mt-4 block text-sm">
+          手机号
+          <input
+            v-model="authPhone"
+            required
+            maxlength="11"
+            placeholder="11 位手机号"
+            class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
+          />
+        </label>
+
+        <template v-if="authMode === 'login'">
+          <label v-if="loginMethod === 'password'" class="mt-3 block text-sm">
+            密码
+            <input
+              v-model="authPassword"
+              type="password"
+              required
+              minlength="6"
+              placeholder="至少 6 位"
+              class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
+            />
+          </label>
+          <label v-else class="mt-3 block text-sm">
+            验证码
+            <div class="mt-1 flex gap-2">
+              <input
+                v-model="authCode"
+                required
+                maxlength="6"
+                placeholder="6 位验证码"
+                class="min-w-0 flex-1 rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
+              />
+              <button
+                type="button"
+                class="shrink-0 rounded-lg border border-[var(--line)] px-3 text-xs disabled:opacity-40"
+                :disabled="busy || smsCooldown > 0 || !authPhone || !cloudUrl"
+                @click="sendSmsCode"
+              >
+                {{ smsCooldown > 0 ? `${smsCooldown}s` : '获取验证码' }}
+              </button>
+            </div>
+          </label>
+        </template>
+
+        <template v-else>
+          <label class="mt-3 block text-sm">
+            密码
+            <input
+              v-model="authPassword"
+              type="password"
+              required
+              minlength="6"
+              placeholder="至少 6 位"
+              class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
+            />
+          </label>
+          <label class="mt-3 block text-sm">
+            确认密码
+            <input
+              v-model="authPassword2"
+              type="password"
+              required
+              minlength="6"
+              class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
+            />
+          </label>
+          <label class="mt-3 block text-sm">
+            短信验证码
+            <div class="mt-1 flex gap-2">
+              <input
+                v-model="authCode"
+                required
+                maxlength="6"
+                class="min-w-0 flex-1 rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
+              />
+              <button
+                type="button"
+                class="shrink-0 rounded-lg border border-[var(--line)] px-3 text-xs disabled:opacity-40"
+                :disabled="busy || smsCooldown > 0 || !authPhone || !cloudUrl"
+                @click="sendSmsCode"
+              >
+                {{ smsCooldown > 0 ? `${smsCooldown}s` : '获取验证码' }}
+              </button>
+            </div>
+          </label>
+          <label class="mt-3 block text-sm">
+            邀请码（可选）
+            <input
+              v-model="authInvite"
+              class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
+            />
+          </label>
+        </template>
+
+        <label class="mt-4 flex cursor-pointer items-start gap-2 text-xs leading-5 text-[var(--muted)]">
+          <input v-model="authAgreed" type="checkbox" class="mt-0.5 accent-[var(--accent)]" />
+          <span>
+            我已阅读并同意
+            <button type="button" class="text-[var(--text)]/80 hover:underline" @click.prevent>
+              服务条款
+            </button>
+            和
+            <button type="button" class="text-[var(--text)]/80 hover:underline" @click.prevent>
+              隐私协议
+            </button>
+          </span>
+        </label>
+
+        <p v-if="error" class="mt-3 text-xs text-[var(--danger)]">{{ error }}</p>
+        <button
+          type="submit"
+          :disabled="busy || !cloudUrl || !authAgreed"
+          class="mt-4 w-full rounded-md bg-[var(--accent)] px-3 py-2 text-sm font-semibold text-[#06221f] disabled:opacity-50"
+        >
+          {{ authMode === 'register' ? '注册并进入' : '登录并进入管理' }}
+        </button>
+        <button
+          v-if="authMode === 'login'"
+          type="button"
+          class="mt-3 w-full rounded-md border border-[var(--line)] px-3 py-2 text-sm text-[var(--muted)] hover:border-[var(--accent)]/40 hover:text-[var(--text)]"
+          @click="authMode = 'register'"
+        >
+          注册账号
+        </button>
+        <button
+          v-else
+          type="button"
+          class="mt-3 w-full text-center text-xs text-[var(--muted)] hover:text-[var(--text)]"
+          @click="authMode = 'login'"
+        >
+          已有账号，返回登录
+        </button>
+      </form>
+    </div>
+
+    <template v-else>
     <header
       class="flex shrink-0 flex-wrap items-center justify-between gap-4 border-b border-[var(--line)] bg-[var(--panel)]/80 px-5 py-3 backdrop-blur"
     >
@@ -730,20 +1208,40 @@ watch(logProfileId, () => {
           <p class="hidden text-sm text-[var(--muted)] sm:block">多仓库启停与日志监控</p>
         </div>
       </div>
-      <div class="flex items-center gap-3">
-        <div class="rounded-md border border-[var(--line)] bg-[#0b1016]/60 px-3 py-1.5 text-sm">
-          <span class="text-[var(--muted)]">运行中</span>
-          <span class="mono font-medium text-[var(--accent)]"> {{ runningCount }}</span>
-          <span class="text-[var(--muted)]"> / {{ projects.length }}</span>
-        </div>
-        <button
-          type="button"
-          :disabled="busy"
-          class="rounded-md bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[#06221f] hover:brightness-110 disabled:opacity-50"
-          @click="showAdd = true"
+      <div class="flex flex-wrap items-center gap-2 sm:gap-3">
+        <div
+          v-if="authUser"
+          class="flex flex-wrap items-center gap-2 rounded-md border border-[var(--line)] bg-[#0b1016]/60 px-3 py-1.5 text-xs"
         >
-          添加仓库
-        </button>
+          <span>{{ authUser.phoneMasked }}</span>
+          <span
+            v-if="authUser.projectLimit != null"
+            class="text-[var(--muted)]"
+            :title="authUser.inviteCode ? `我的邀请码 ${authUser.inviteCode}` : ''"
+          >
+            项目 {{ authUser.projectCount ?? projects.length }}/{{ authUser.projectLimit }}
+          </span>
+          <span v-if="authUser.aiQuota" class="text-[var(--muted)]">
+            AI {{ authUser.aiQuota.remaining }}/{{ authUser.aiQuota.limit }}
+          </span>
+          <button
+            v-if="missingProjects.length > 0"
+            type="button"
+            class="rounded border border-[var(--line)] px-2 py-0.5 hover:border-[var(--accent)]/40"
+            :disabled="busy"
+            @click="restoreMissing"
+          >
+            恢复缺失 {{ missingProjects.length }}
+          </button>
+          <button
+            type="button"
+            class="text-[var(--muted)] hover:text-[var(--text)]"
+            :disabled="busy"
+            @click="logout"
+          >
+            退出
+          </button>
+        </div>
       </div>
     </header>
 
@@ -763,26 +1261,78 @@ watch(logProfileId, () => {
         class="relative flex min-h-0 flex-col border-b border-[var(--line)] lg:h-full lg:w-[var(--sidebar-w)] lg:shrink-0 lg:border-r lg:border-b-0"
         :class="sidebarResizing ? '' : 'lg:transition-[width] lg:duration-200'"
       >
-        <div
-          class="flex shrink-0 items-center justify-between gap-2 border-b border-[var(--line)] px-3 py-2.5"
-        >
+        <div class="shrink-0 border-b border-[var(--line)] px-3 py-2.5">
           <div
-            class="flex min-w-0 items-center gap-2"
-            :class="sidebarCollapsed ? 'lg:hidden' : ''"
+            v-if="!sidebarCollapsed"
+            class="flex items-center gap-2"
           >
-            <h2 class="text-xs font-medium tracking-wide text-[var(--muted)] uppercase">项目</h2>
-            <span class="mono text-xs text-[var(--muted)]">
-              {{ filteredProjects.length }}/{{ projects.length }}
-            </span>
+            <div class="min-w-0 flex-1 rounded-md border border-[var(--line)] bg-[#0b1016]/60 px-2.5 py-1.5 text-sm">
+              <span class="text-[var(--muted)]">运行中</span>
+              <span class="mono font-medium text-[var(--accent)]"> {{ runningCount }}</span>
+              <span class="text-[var(--muted)]"> / {{ projects.length }}</span>
+            </div>
+            <button
+              type="button"
+              :disabled="busy"
+              class="shrink-0 rounded-md bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[#06221f] hover:brightness-110 disabled:opacity-50"
+              @click="showAdd = true"
+            >
+              添加仓库
+            </button>
+            <button
+              type="button"
+              class="hidden rounded border border-[var(--line)] px-2 py-1 text-[11px] text-[var(--muted)] hover:border-[var(--accent)]/40 hover:text-[var(--text)] lg:inline-flex"
+              title="收起侧栏"
+              @click="toggleSidebarCollapsed"
+            >
+              «
+            </button>
           </div>
-          <button
-            type="button"
-            class="ml-auto hidden rounded border border-[var(--line)] px-2 py-1 text-[11px] text-[var(--muted)] hover:border-[var(--accent)]/40 hover:text-[var(--text)] lg:inline-flex"
-            :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'"
-            @click="toggleSidebarCollapsed"
+          <div
+            v-else
+            class="flex flex-col items-center gap-2"
           >
-            {{ sidebarCollapsed ? '»' : '«' }}
-          </button>
+            <button
+              type="button"
+              class="hidden rounded border border-[var(--line)] px-2 py-1 text-[11px] text-[var(--muted)] hover:border-[var(--accent)]/40 hover:text-[var(--text)] lg:inline-flex"
+              title="展开侧栏"
+              @click="toggleSidebarCollapsed"
+            >
+              »
+            </button>
+            <div
+              class="hidden w-full rounded-md border border-[var(--line)] bg-[#0b1016]/60 px-1 py-1 text-center text-[10px] leading-tight lg:block"
+              :title="`运行中 ${runningCount} / ${projects.length}`"
+            >
+              <div class="text-[var(--muted)]">运行</div>
+              <div class="mono font-medium text-[var(--accent)]">{{ runningCount }}/{{ projects.length }}</div>
+            </div>
+            <button
+              type="button"
+              :disabled="busy"
+              class="hidden h-9 w-9 items-center justify-center rounded-md bg-[var(--accent)] text-lg font-semibold text-[#06221f] hover:brightness-110 disabled:opacity-50 lg:inline-flex"
+              title="添加仓库"
+              @click="showAdd = true"
+            >
+              +
+            </button>
+            <!-- 窄屏仍展示完整控件 -->
+            <div class="flex w-full items-center gap-2 lg:hidden">
+              <div class="min-w-0 flex-1 rounded-md border border-[var(--line)] bg-[#0b1016]/60 px-2.5 py-1.5 text-sm">
+                <span class="text-[var(--muted)]">运行中</span>
+                <span class="mono font-medium text-[var(--accent)]"> {{ runningCount }}</span>
+                <span class="text-[var(--muted)]"> / {{ projects.length }}</span>
+              </div>
+              <button
+                type="button"
+                :disabled="busy"
+                class="shrink-0 rounded-md bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[#06221f] hover:brightness-110 disabled:opacity-50"
+                @click="showAdd = true"
+              >
+                添加仓库
+              </button>
+            </div>
+          </div>
         </div>
 
         <div
@@ -967,6 +1517,7 @@ watch(logProfileId, () => {
         </div>
 
         <template v-else>
+          <div class="flex min-h-0 flex-1 flex-col">
           <div class="shrink-0 border-b border-[var(--line)] px-5 py-2.5">
             <div class="flex flex-wrap items-start justify-between gap-3">
               <div class="min-w-0 flex-1">
@@ -1009,7 +1560,7 @@ watch(logProfileId, () => {
                   已收起项目详情与启动模式 · 下方控制台可全高查看
                 </p>
               </div>
-              <div class="flex flex-wrap gap-2">
+              <div class="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   :disabled="busy || !selected.exists"
@@ -1018,6 +1569,29 @@ watch(logProfileId, () => {
                   @click="installSelected"
                 >
                   安装依赖
+                </button>
+                <select
+                  :value="buildProfileId"
+                  :disabled="busy || !selected.exists || !(selected.buildProfiles?.length)"
+                  class="max-w-[10rem] rounded-md border border-[var(--line)] bg-[#0b1016] px-2 py-1.5 text-xs outline-none disabled:opacity-40"
+                  @change="onBuildProfileChange"
+                >
+                  <option
+                    v-for="item in selected.buildProfiles"
+                    :key="item.id"
+                    :value="item.id"
+                  >
+                    {{ item.name }}
+                  </option>
+                </select>
+                <button
+                  type="button"
+                  :disabled="busy || !selected.exists || !buildProfileId"
+                  class="rounded-md border px-3 py-1.5 text-xs font-medium disabled:opacity-40"
+                  :class="toneClass('ok')"
+                  @click="buildSelected()"
+                >
+                  构建
                 </button>
                 <button
                   v-if="selected.hasAnalysis"
@@ -1053,8 +1627,12 @@ watch(logProfileId, () => {
                 </button>
               </div>
             </div>
+          </div>
 
-            <div v-show="!detailMetaCollapsed" class="mt-3">
+            <div
+              v-show="!detailMetaCollapsed"
+              class="min-h-0 max-h-[min(46vh,34rem)] shrink overflow-y-auto border-b border-[var(--line)] px-5 py-3"
+            >
               <div
                 v-if="selected.phases?.length"
                 class="flex flex-wrap gap-1.5"
@@ -1070,12 +1648,20 @@ watch(logProfileId, () => {
                   <span class="opacity-70">· {{ phaseLabel(phase.status) }}</span>
                 </span>
               </div>
-              <p
+              <div
                 v-if="!selected.exists"
-                class="mt-2 text-xs text-[var(--danger)]"
+                class="mt-2 space-y-2 text-xs text-[var(--danger)]"
               >
-                项目目录不存在（{{ selected.absolutePath }}），启动已禁用。请检查清单 path 或重新克隆。
-              </p>
+                <p>项目目录不存在（{{ selected.absolutePath }}），启动已禁用。</p>
+                <button
+                  type="button"
+                  class="rounded border border-[var(--danger)]/40 px-2 py-1 text-[11px] text-[var(--warn)] hover:bg-[#3a3420]"
+                  :disabled="busy"
+                  @click="restoreOne(selected.id)"
+                >
+                  重新克隆恢复
+                </button>
+              </div>
               <div v-if="projectUrls(selected).length" class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
                 <span class="text-xs text-[var(--muted)]">运行地址</span>
                 <a
@@ -1178,6 +1764,65 @@ watch(logProfileId, () => {
                   </div>
                 </div>
               </div>
+
+              <div v-if="selected.buildProfiles?.length" class="mt-3 space-y-2">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-xs text-[var(--muted)]">构建目标（按包 / 脚本）</span>
+                  <span class="text-[11px] text-[var(--muted)]">
+                    默认 {{ selected.defaultBuildProfileId }}
+                  </span>
+                </div>
+                <div
+                  v-for="item in selected.buildProfiles"
+                  :key="item.id"
+                  class="rounded-lg border border-[var(--line)] bg-[#0b1016]/70 px-3 py-2"
+                >
+                  <div class="flex flex-wrap items-start justify-between gap-2">
+                    <div class="min-w-0">
+                      <div class="flex flex-wrap items-center gap-2">
+                        <span class="text-sm font-medium">{{ item.name }}</span>
+                        <span
+                          v-if="item.id === selected.defaultBuildProfileId"
+                          class="rounded bg-[var(--accent)]/15 px-1.5 py-0.5 text-[10px] text-[var(--accent)]"
+                        >
+                          默认
+                        </span>
+                      </div>
+                      <p class="mono mt-1 break-all text-[11px] text-[var(--muted)]">
+                        {{ item.command }}
+                        <span v-if="item.cwd"> · cwd {{ item.cwd }}</span>
+                      </p>
+                      <p v-if="item.description" class="mt-1 text-[11px] text-[var(--muted)]">
+                        {{ item.description }}
+                      </p>
+                    </div>
+                    <div class="flex shrink-0 gap-1.5">
+                      <button
+                        type="button"
+                        class="rounded border px-2 py-1 text-[11px] font-medium"
+                        :class="
+                          logProfileId === `build:${item.id}`
+                            ? 'border-[var(--accent)]/50 text-[var(--accent)]'
+                            : toneClass()
+                        "
+                        @click="logProfileId = `build:${item.id}`; detailTab = 'logs'"
+                      >
+                        日志
+                      </button>
+                      <button
+                        type="button"
+                        :disabled="busy || !selected.exists"
+                        class="rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-40"
+                        :class="toneClass('ok')"
+                        @click="buildSelected(item.id)"
+                      >
+                        构建
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <div class="mt-2 flex flex-wrap items-center gap-2">
                 <span class="text-xs text-[var(--muted)]">分类标签</span>
                 <input
@@ -1196,7 +1841,6 @@ watch(logProfileId, () => {
                 </button>
               </div>
             </div>
-          </div>
 
           <p v-if="selected.runtime.error" class="shrink-0 px-5 py-2 text-sm text-[var(--danger)]">
             {{ selected.runtime.error }}
@@ -1245,8 +1889,23 @@ watch(logProfileId, () => {
                   >
                     {{ item.profile.name }}
                   </option>
+                  <option
+                    v-for="item in selected.buildProfiles"
+                    :key="`build:${item.id}`"
+                    :value="`build:${item.id}`"
+                  >
+                    构建 · {{ item.name }}
+                  </option>
                 </select>
                 <span class="text-xs text-[var(--muted)]">自动刷新 · 近 300 行</span>
+                <button
+                  type="button"
+                  :disabled="busy || logs.length === 0"
+                  class="rounded border border-[var(--line)] px-2 py-1 text-[11px] text-[var(--muted)] hover:border-[var(--danger)]/40 hover:text-[var(--danger)] disabled:opacity-40"
+                  @click="clearLogs"
+                >
+                  清空
+                </button>
               </div>
               <div v-else class="flex flex-wrap items-center gap-2">
                 <span v-if="analysis?.updatedAt" class="text-xs text-[var(--muted)]">
@@ -1258,7 +1917,7 @@ watch(logProfileId, () => {
                   class="rounded border border-[var(--line)] px-2 py-1 text-[11px] text-[var(--muted)] hover:border-[var(--accent)]/40 hover:text-[var(--text)] disabled:opacity-40"
                   @click="regenerateAnalysis"
                 >
-                  重新生成
+                  本地重生成
                 </button>
               </div>
             </div>
@@ -1291,7 +1950,7 @@ watch(logProfileId, () => {
                 v-html="analysisHtml"
               />
               <div v-else class="text-sm text-[var(--muted)]">
-                <p>尚未生成项目分析总结（打开本页或添加仓库时会自动生成）。</p>
+                <p>尚未生成项目分析总结。已登录时首次「添加仓库」会走 Cloud AI（计配额）；未登录或失败则本地启发式。本页按钮仅本地规则。</p>
                 <p class="mono mt-2 text-xs">
                   约定路径：{{ analysis?.relativePath ?? 'docs/项目分析总结.md' }}
                 </p>
@@ -1301,10 +1960,11 @@ watch(logProfileId, () => {
                   class="mt-4 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-[#06221f] disabled:opacity-50"
                   @click="regenerateAnalysis"
                 >
-                  立即生成
+                  本地生成
                 </button>
               </div>
             </div>
+          </div>
           </div>
         </template>
       </main>
@@ -1388,5 +2048,6 @@ watch(logProfileId, () => {
         </div>
       </form>
     </div>
+    </template>
   </div>
 </template>

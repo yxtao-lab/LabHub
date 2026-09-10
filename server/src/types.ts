@@ -17,6 +17,17 @@ export type StartProfile = {
   description?: string;
 };
 
+/** 构建目标（不同包 / 不同脚本） */
+export type BuildProfile = {
+  id: string;
+  name: string;
+  /** shell 命令，相对 cwd 执行 */
+  command: string;
+  /** 相对项目根的工作目录，空则用项目根 */
+  cwd?: string | null;
+  description?: string;
+};
+
 /** 项目研发分期 */
 export type ProjectPhase = {
   id: string;
@@ -46,8 +57,12 @@ export type ProjectRecord = {
   notes: string;
   /** 多端 / 多场景启动模式；缺省由 startCommand 合成 */
   startProfiles?: StartProfile[];
+  /** 构建目标列表；缺省由 package 管理器合成一条默认 build */
+  buildProfiles?: BuildProfile[];
   /** 侧栏「启动」使用的默认模式 */
   defaultProfileId?: string | null;
+  /** 默认构建目标 id */
+  defaultBuildProfileId?: string | null;
   /** 研发分期说明 */
   phases?: ProjectPhase[];
   /** 当前所处分期 id，如 P2 */
@@ -101,7 +116,9 @@ export type ProjectView = ProjectRecord & {
   /** 是否已有 docs/项目分析总结.md */
   hasAnalysis: boolean;
   startProfiles: StartProfile[];
+  buildProfiles: BuildProfile[];
   defaultProfileId: string;
+  defaultBuildProfileId: string;
   phases: ProjectPhase[];
   currentPhase: string | null;
 };

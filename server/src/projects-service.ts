@@ -295,7 +295,6 @@ export async function toProjectView(record: ProjectRecord): Promise<ProjectView>
  * @returns 项目视图数组
  */
 export async function listProjectViews(): Promise<ProjectView[]> {
-  await ensureComprehensiveProfiles();
   const projects = loadProjects();
   return Promise.all(projects.map((item) => toProjectView(item)));
 }

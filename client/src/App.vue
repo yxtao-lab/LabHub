@@ -2264,6 +2264,24 @@ function profileDetectedUrls(item: ProfileRuntimeView): string[] {
 }
 
 /**
+ * 比较两个运行地址是否为同一处（localhost / 127.0.0.1 视为相同）。
+ *
+ * @param left - 地址 A
+ * @param right - 地址 B
+ * @returns 是否同一地址
+ */
+function sameRuntimeUrl(left: string, right: string): boolean {
+  const normalize = (url: string) =>
+    url
+      .trim()
+      .replace(/\/$/, '')
+      .replace(/:\/\/localhost/gi, '://127.0.0.1')
+      .replace(/:\/\/0\.0\.0\.0/gi, '://127.0.0.1')
+      .toLowerCase();
+  return normalize(left) === normalize(right);
+}
+
+/**
  * 某启动模式仅登记、尚未被探测覆盖的地址。
  *
  * @param item - 模式运行视图
@@ -2274,8 +2292,8 @@ function profileConfiguredOnlyUrls(item: ProfileRuntimeView): string[] {
   if (!openUrl) {
     return [];
   }
-  const detected = new Set(profileDetectedUrls(item));
-  return detected.has(openUrl) ? [] : [openUrl];
+  const detected = profileDetectedUrls(item);
+  return detected.some((url) => sameRuntimeUrl(url, openUrl)) ? [] : [openUrl];
 }
 
 /**

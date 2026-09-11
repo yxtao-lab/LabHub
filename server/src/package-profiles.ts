@@ -685,26 +685,105 @@ function sameCommandSet(
 }
 
 /**
- * 保留清单中「非 package 推断」的自定义模式（按 command 去重追加）。
+ * 从 `pnpm run foo` / `npm run foo` / `yarn foo` / `bun run foo` 抽出 script 名。
+ *
+ * @param command - 完整命令
+ * @returns script 名；无法识别时 null
+ */
+function parseRunScriptName(command: string): string | null {
+  const match = command
+    .trim()
+    .match(/^(?:npm run|pnpm run|bun run|yarn(?: run)?)\s+(\S+)/i);
+  return match?.[1] ?? null;
+}
+
+/**
+ * 是否为 LabHub 会从 package.json 自动推断的启停/构建脚本命令（已从清单删除的旧脚本）。
+ *
+ * @param command - 命令
+ * @param kind - 启动或构建
+ * @param inferredCommands - 当前推断出的命令集合
+ * @returns 是否应丢弃
+ */
+function isStaleAutoScriptCommand(
+  command: string,
+  kind: 'start' | 'build',
+  inferredCommands: Set<string>,
+): boolean {
+  if (inferredCommands.has(command)) {
+    return false;
+  }
+  const scriptName = parseRunScriptName(command);
+  if (!scriptName) {
+    return false;
+  }
+  const matchesKind =
+    kind === 'start'
+      ? START_SCRIPT_RE.test(scriptName) && !EXCLUDED_SCRIPT_RE.test(scriptName)
+      : BUILD_SCRIPT_RE.test(scriptName) && !EXCLUDED_SCRIPT_RE.test(scriptName);
+  return matchesKind;
+}
+
+/**
+ * 推断结果是否尚未全部出现在当前登记中。
+ *
+ * @param inferred - 推断列表
+ * @param current - 当前登记
+ * @returns 是否缺命令
+ */
+function missingInferredCommands(
+  inferred: Array<{ command: string }>,
+  current: Array<{ command: string }>,
+): boolean {
+  const have = new Set(current.map((item) => item.command));
+  return inferred.some((item) => !have.has(item.command));
+}
+
+/**
+ * 保留清单中真正手写的自定义模式；丢掉已从 package.json 消失的自动脚本。
  *
  * @param inferred - 推断列表
  * @param previous - 原列表
+ * @param kind - 启动或构建
  * @returns 合并后的列表
  */
 function keepCustomProfiles<T extends { id: string; command: string }>(
   inferred: T[],
   previous: T[] | undefined,
+  kind: 'start' | 'build',
 ): T[] {
   if (!previous?.length) {
     return inferred;
   }
-  const commands = new Set(inferred.map((item) => item.command));
-  const extras = previous.filter((item) => !commands.has(item.command));
+  const inferredCommands = new Set(inferred.map((item) => item.command));
+  const extras = previous.filter(
+    (item) =>
+      !inferredCommands.has(item.command) &&
+      !isStaleAutoScriptCommand(item.command, kind, inferredCommands),
+  );
   return extras.length ? [...inferred, ...extras] : inferred;
 }
 
 /**
- * 判断登记的启动/构建模式是否相对仓库清单不完整。
+ * 两份登记的启停/安装命令是否实质相同（忽略 updatedAt）。
+ *
+ * @param left - 左侧
+ * @param right - 右侧
+ * @returns 是否相同
+ */
+function recordProfilesEqual(left: ProjectRecord, right: ProjectRecord): boolean {
+  return (
+    (left.installCommand || '') === (right.installCommand || '') &&
+    (left.startCommand || '') === (right.startCommand || '') &&
+    (left.defaultProfileId || '') === (right.defaultProfileId || '') &&
+    (left.defaultBuildProfileId || '') === (right.defaultBuildProfileId || '') &&
+    sameCommandSet(left.startProfiles ?? [], right.startProfiles ?? []) &&
+    sameCommandSet(left.buildProfiles ?? [], right.buildProfiles ?? [])
+  );
+}
+
+/**
+ * 判断登记的启动/构建模式是否相对仓库清单不完整或含过期自动脚本。
  *
  * @param record - 项目登记
  * @param root - 项目绝对路径
@@ -720,7 +799,6 @@ export function needsProfileRefresh(record: ProjectRecord, root: string): boolea
     previous: record,
     openUrl: record.openUrl,
   });
-  // unknown 兜底且本来就是手写命令时不要反复覆盖
   if (inferred.kind === 'unknown') {
     return false;
   }
@@ -730,18 +808,25 @@ export function needsProfileRefresh(record: ProjectRecord, root: string): boolea
   const currentBuilds = record.buildProfiles?.length
     ? record.buildProfiles
     : [];
-  if (inferred.startProfiles.length > currentStarts.length) {
+  const inferredStartCommands = new Set(inferred.startProfiles.map((item) => item.command));
+  const inferredBuildCommands = new Set(inferred.buildProfiles.map((item) => item.command));
+  if (missingInferredCommands(inferred.startProfiles, currentStarts)) {
     return true;
   }
-  if (inferred.buildProfiles.length > currentBuilds.length) {
-    return true;
-  }
-  if (!sameCommandSet(inferred.startProfiles, currentStarts)) {
+  if (missingInferredCommands(inferred.buildProfiles, currentBuilds)) {
     return true;
   }
   if (
-    inferred.buildProfiles.length > 0 &&
-    !sameCommandSet(inferred.buildProfiles, currentBuilds)
+    currentStarts.some((item) =>
+      isStaleAutoScriptCommand(item.command, 'start', inferredStartCommands),
+    )
+  ) {
+    return true;
+  }
+  if (
+    currentBuilds.some((item) =>
+      isStaleAutoScriptCommand(item.command, 'build', inferredBuildCommands),
+    )
   ) {
     return true;
   }
@@ -779,12 +864,14 @@ export function refreshRecordProfiles(
   const startProfiles = keepCustomProfiles(
     inferred.startProfiles,
     record.startProfiles,
+    'start',
   );
   const buildProfiles = keepCustomProfiles(
     inferred.buildProfiles,
     record.buildProfiles,
+    'build',
   );
-  return {
+  const next: ProjectRecord = {
     ...record,
     startCommand: inferred.startCommand,
     installCommand: isGenericNpmInstall(record.installCommand)
@@ -796,4 +883,8 @@ export function refreshRecordProfiles(
     defaultBuildProfileId: inferred.defaultBuildProfileId,
     updatedAt: new Date().toISOString(),
   };
+  if (recordProfilesEqual(record, next)) {
+    return null;
+  }
+  return next;
 }

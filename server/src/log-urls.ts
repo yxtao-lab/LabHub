@@ -1,24 +1,38 @@
 import type { LogLine } from './types.js';
 
+/** 去掉终端颜色码，避免 Vite 着色后抽不出 URL */
+const ANSI_ESCAPE = /\u001b(?:\[[0-9;]*[A-Za-z]|].*?(?:\u0007|\u001b\\))/g;
+
 /** 匹配日志中常见的本机 / 局域网 HTTP(S) 地址 */
 const RUNTIME_URL_PATTERN =
-  /https?:\/\/(?:\[[^\]]+\]|localhost|127\.0\.0\.1|(?:\d{1,3}\.){3}\d{1,3})(?::\d{2,5})?(?:\/[^\s"'`<>]*)?/gi;
+  /https?:\/\/(?:\[[^\]]+\]|localhost|127\.0\.0\.1|0\.0\.0\.0|(?:\d{1,3}\.){3}\d{1,3})(?::\d{2,5})?(?:\/[^\s"'`<>\u001b]*)?/gi;
 
 /**
- * 规范化运行地址：去掉尾部标点，并将 [::] / [::1] 转为 127.0.0.1 便于浏览器打开。
+ * 去掉 ANSI 转义，便于从着色日志里截取 URL。
+ *
+ * @param text - 原始日志
+ * @returns 纯文本
+ */
+function stripAnsi(text: string): string {
+  return text.replace(ANSI_ESCAPE, '');
+}
+
+/**
+ * 规范化运行地址：去掉尾部标点，并将 [::] / localhost / 0.0.0.0 转为 127.0.0.1 便于浏览器打开。
  *
  * @param raw - 日志中截取的原始 URL
  * @returns 规范化后的 URL；无法解析时返回 null
  */
 export function normalizeRuntimeUrl(raw: string): string | null {
-  let value = raw.trim().replace(/[),.;\]}>]+$/g, '');
+  let value = stripAnsi(raw).trim().replace(/[),.;\]}>]+$/g, '');
   if (!/^https?:\/\//i.test(value)) {
     return null;
   }
   value = value
     .replace(/:\/\/\[::\]/gi, '://127.0.0.1')
     .replace(/:\/\/\[::1\]/gi, '://127.0.0.1')
-    .replace(/:\/\/localhost/gi, '://127.0.0.1');
+    .replace(/:\/\/localhost/gi, '://127.0.0.1')
+    .replace(/:\/\/0\.0\.0\.0/gi, '://127.0.0.1');
   try {
     const parsed = new URL(value);
     if (!['http:', 'https:'].includes(parsed.protocol)) {
@@ -93,7 +107,7 @@ export function extractRuntimeUrls(logs: LogLine[], limit = 8): string[] {
     if (!line) {
       continue;
     }
-    const text = line.text;
+    const text = stripAnsi(line.text);
     const matches = text.match(RUNTIME_URL_PATTERN);
     if (!matches) {
       continue;

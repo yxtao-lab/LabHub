@@ -9,6 +9,11 @@ import {
 } from './analysis.js';
 import { resolveProjectPath } from './store.js';
 import type { ProjectRecord } from './types.js';
+import {
+  buildScriptRunCommand,
+  resolveAnalysisCommands,
+  type AnalysisCommandSnapshot,
+} from './package-profiles.js';
 
 type PackageJson = {
   name?: string;
@@ -101,8 +106,10 @@ function inferStack(pkg: PackageJson | null): string[] {
   }
   if (pkg.packageManager?.startsWith('pnpm')) {
     hits.unshift('pnpm');
-  } else if (fs.existsSync(path.join(process.cwd(), 'pnpm-lock.yaml'))) {
-    // 占位；真实根目录在调用处再判
+  } else if (pkg.packageManager?.startsWith('yarn')) {
+    hits.unshift('yarn');
+  } else if (pkg.packageManager?.startsWith('bun')) {
+    hits.unshift('bun');
   }
   return hits.length > 0 ? hits : ['Node.js 生态（依据 package.json）'];
 }
@@ -238,21 +245,30 @@ export function buildAnalysisMarkdown(record: ProjectRecord): string {
   const readme =
     readTextSafe(path.join(root, 'README.md'), 60_000) ??
     readTextSafe(path.join(root, 'readme.md'), 60_000);
+  const commands = resolveAnalysisCommands(root, record);
   const hasPnpmLock = fs.existsSync(path.join(root, 'pnpm-lock.yaml'));
   const hasNpmLock = fs.existsSync(path.join(root, 'package-lock.json'));
-  const packageManager = pkg?.packageManager
-    ? pkg.packageManager
-    : hasPnpmLock
-      ? 'pnpm'
-      : hasNpmLock
-        ? 'npm'
-        : '未知';
-  const installCmd = record.installCommand || (hasPnpmLock ? 'pnpm install' : 'npm install');
-  const startCmd = record.startCommand || 'npm run dev';
+  const packageManager =
+    pkg?.packageManager ||
+    (commands.packageManager !== 'unknown' ? String(commands.packageManager) : hasPnpmLock ? 'pnpm' : hasNpmLock ? 'npm' : '未知');
+  const installCmd = commands.installCommand;
+  const startCmd = commands.startCommand;
+  const scriptRunner =
+    commands.packageManager === 'pnpm' ||
+    commands.packageManager === 'yarn' ||
+    commands.packageManager === 'npm' ||
+    commands.packageManager === 'bun'
+      ? commands.packageManager
+      : hasPnpmLock
+        ? 'pnpm'
+        : 'npm';
   const openUrl = record.openUrl ?? '（未配置 openUrl）';
   const stack = inferStack(pkg);
-  if (hasPnpmLock && !stack.includes('pnpm')) {
-    stack.unshift('pnpm');
+  if (
+    commands.packageManager !== 'unknown' &&
+    !stack.includes(String(commands.packageManager))
+  ) {
+    stack.unshift(String(commands.packageManager));
   }
   const dirs = listTopDirs(root);
   const envNames = listEnvNames(root);
@@ -261,8 +277,8 @@ export function buildAnalysisMarkdown(record: ProjectRecord): string {
   const displayName = record.name || pkg?.name || record.id;
   const description = pkg?.description || summarizeReadme(readme);
   const profiles =
-    record.startProfiles && record.startProfiles.length > 0
-      ? record.startProfiles
+    commands.startProfiles.length > 0
+      ? commands.startProfiles
       : [
           {
             id: 'default',
@@ -277,10 +293,14 @@ export function buildAnalysisMarkdown(record: ProjectRecord): string {
 
   const scriptRows = scripts
     .map((name) => {
-      const cmd = hasPnpmLock ? `pnpm ${name}` : `npm run ${name}`;
+      const cmd = buildScriptRunCommand(scriptRunner, name);
       return `| \`${cmd}\` | \`${pkg?.scripts?.[name] ?? ''}\` |`;
     })
     .join('\n');
+  const extraRows = commands.extraCommands
+    .map((cmd) => `| \`${cmd}\` | 仓库清单推断 |`)
+    .join('\n');
+  const scriptTableRows = [scriptRows, extraRows].filter(Boolean).join('\n');
 
   const profileRows = profiles
     .map(
@@ -315,11 +335,18 @@ export function buildAnalysisMarkdown(record: ProjectRecord): string {
 | 类型 | ${pkg?.workspaces ? 'Monorepo / Workspace' : '应用 / 库（据 package.json）'} |
 | 主要语言 | TypeScript / JavaScript（据 Node 项目常见结构；以仓库为准） |
 | 包管理器 | ${packageManager} |
+| 安装依赖 | \`${installCmd}\` |
+| 默认启动 | \`${startCmd}\` |
 | 版本线索 | ${pkg?.version ?? '未知'} |
 | LabHub 标签 | ${tagLine} |
 | 默认分支 | ${record.branch} |
 | 远程仓库 | ${record.repoUrl} |
 
+${
+  commands.catalogInstallMismatch
+    ? `> 注意：LabHub 清单曾登记安装命令 \`${commands.catalogInstallCommand}\`，与仓库锁文件/包管理器不符；本文与控制台安装均以 \`${installCmd}\` 为准。\n`
+    : ''
+}
 ### 2.1 目标与范围
 
 - 要解决的问题：${description}
@@ -335,7 +362,7 @@ export function buildAnalysisMarkdown(record: ProjectRecord): string {
 | # | 我可以… | 得到的结果 | 依据 |
 |---|---|---|---|
 | 1 | 在 LabHub 中启动默认模式（\`${profiles[0]?.id ?? 'default'}\`） | 进程受控、可查看日志 | 登记 \`startCommand\` / \`startProfiles\` |
-| 2 | 执行安装命令 \`${installCmd}\` | 依赖就绪 | LabHub \`installCommand\` |
+| 2 | 执行安装命令 \`${installCmd}\` | 依赖就绪 | 仓库锁文件 / 包管理器识别 |
 | 3 | 按 README / scripts 做日常开发构建 | 本地可改代码并验证 | \`package.json\` scripts |
 | 4 | 向 origin 提交推送 | 变更回到源仓库 | \`repoUrl\`=${record.repoUrl} |
 
@@ -381,7 +408,8 @@ ${profileRows}
 | 层级 | 选型 | 依据 |
 |---|---|---|
 | 工程 | ${stack.join('、')} | package.json / lockfile |
-| 启动 | \`${startCmd}\` | LabHub 登记 |
+| 启动 | \`${startCmd}\` | package.json scripts / 识别结果 |
+| 安装 | \`${installCmd}\` | ${commands.evidence.join('、') || '仓库清单'} |
 | Node engines | ${pkg?.engines ? JSON.stringify(pkg.engines) : '未声明'} | package.json |
 
 ## 6. 架构与目录
@@ -418,7 +446,7 @@ ${envRows}
 
 | 命令 | 脚本内容 |
 |---|---|
-${scriptRows || '| （无 scripts） | — |'}
+${scriptTableRows || '| （无 scripts） | — |'}
 
 ## 10. 风险与约定
 
@@ -467,6 +495,77 @@ function ensureRemoteRepoInOverview(markdown: string, repoUrl: string): string {
 }
 
 /**
+ * 确保「项目概览」含安装/启动命令行（模型漏写时按识别结果补全）。
+ *
+ * @param markdown - 原始 Markdown
+ * @param commands - 已识别命令
+ * @returns 补全后的 Markdown
+ */
+function ensureCommandRowsInOverview(
+  markdown: string,
+  commands: AnalysisCommandSnapshot,
+): string {
+  let body = markdown;
+  if (commands.installCommand && !/\| 安装依赖 \|/.test(body)) {
+    const next = body.replace(
+      /(\| 包管理器 \|[^\n]*\n)/,
+      `$1| 安装依赖 | \`${commands.installCommand}\` |\n`,
+    );
+    body = next !== body ? next : body.replace(
+      /(\| 远程仓库 \|[^\n]*\n)/,
+      `| 安装依赖 | \`${commands.installCommand}\` |\n$1`,
+    );
+  }
+  if (commands.startCommand && !/\| 默认启动 \|/.test(body)) {
+    const anchor = /\| 安装依赖 \|/.test(body) ? /(\| 安装依赖 \|[^\n]*\n)/ : /(\| 包管理器 \|[^\n]*\n)/;
+    body = body.replace(anchor, `$1| 默认启动 | \`${commands.startCommand}\` |\n`);
+  }
+  return body;
+}
+
+/**
+ * 将文档中误写的 npm 安装/脚本命令改成仓库实际包管理器。
+ * 含「曾登记」的说明行不改，以免把冲突提示改没。
+ *
+ * @param markdown - 原始 Markdown
+ * @param commands - 已识别命令
+ * @returns 纠正后的 Markdown
+ */
+function alignMarkdownCommands(
+  markdown: string,
+  commands: AnalysisCommandSnapshot,
+): string {
+  const pm = commands.packageManager;
+  if (pm !== 'pnpm' && pm !== 'yarn' && pm !== 'bun') {
+    return markdown;
+  }
+  return markdown
+    .split('\n')
+    .map((line) => {
+      if (/曾登记|installCommand/.test(line)) {
+        return line;
+      }
+      let next = line;
+      if (pm === 'pnpm') {
+        next = next.replace(/\bnpm ci\b/g, 'pnpm install --frozen-lockfile');
+        next = next.replace(/\bnpm install\b/g, 'pnpm install');
+        next = next.replace(/\bnpm run\b/g, 'pnpm run');
+      } else if (pm === 'yarn') {
+        next = next.replace(/\bnpm ci\b/g, 'yarn install --frozen-lockfile');
+        next = next.replace(/\bnpm install\b/g, 'yarn');
+        next = next.replace(/\bnpm run\s+(\S+)/g, 'yarn $1');
+        next = next.replace(/\bnpm run\b/g, 'yarn');
+      } else {
+        next = next.replace(/\bnpm ci\b/g, 'bun install --frozen-lockfile');
+        next = next.replace(/\bnpm install\b/g, 'bun install');
+        next = next.replace(/\bnpm run\b/g, 'bun run');
+      }
+      return next;
+    })
+    .join('\n');
+}
+
+/**
  * 将分析 Markdown 写入约定路径（创建 docs/）。
  *
  * @param record - 项目登记
@@ -475,7 +574,11 @@ function ensureRemoteRepoInOverview(markdown: string, repoUrl: string): string {
  */
 export function writeAnalysisFile(record: ProjectRecord, markdown: string): ProjectAnalysis {
   const absolutePath = resolveAnalysisPath(record.path);
-  const body = ensureRemoteRepoInOverview(markdown, record.repoUrl);
+  const root = resolveProjectPath(record.path);
+  const commands = resolveAnalysisCommands(root, record);
+  let body = ensureRemoteRepoInOverview(markdown, record.repoUrl);
+  body = ensureCommandRowsInOverview(body, commands);
+  body = alignMarkdownCommands(body, commands);
   fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
   fs.writeFileSync(absolutePath, body, 'utf8');
   return readProjectAnalysis(record.path);

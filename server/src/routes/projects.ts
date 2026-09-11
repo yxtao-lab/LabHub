@@ -1,14 +1,17 @@
 import { Router } from 'express';
 import { readProjectAnalysis } from '../analysis.js';
 import { ensureMissingAnalyses, generateProjectAnalysis } from '../analysis-generate.js';
+import { listRemoteBranches } from '../git.js';
 import {
   addProject,
   addProjectSchema,
   buildProject,
+  checkoutBranchForProject,
   clearProjectLogs,
   deleteProject,
   getProjectLogs,
   installProject,
+  listBranchesForProject,
   listProjectViews,
   startProject,
   stopProject,
@@ -29,6 +32,23 @@ projectsRouter.get('/', async (_req, res, next) => {
   try {
     const projects = await listProjectViews();
     res.json({ projects });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/projects/remote-branches?repoUrl= — 探测远程全部分支
+ */
+projectsRouter.get('/remote-branches', async (req, res, next) => {
+  try {
+    const repoUrl = String(req.query.repoUrl ?? '').trim();
+    if (!repoUrl) {
+      res.status(400).json({ error: '缺少 repoUrl' });
+      return;
+    }
+    const result = await listRemoteBranches(repoUrl);
+    res.json(result);
   } catch (error) {
     next(error);
   }
@@ -104,6 +124,7 @@ projectsRouter.get('/:id', async (req, res, next) => {
 
 /**
  * POST /api/projects — 提供 GitHub 地址登记并克隆
+ * 查询参数 stream=1 时返回 NDJSON 进度流，最后一行为 done/error。
  */
 projectsRouter.post('/', async (req, res, next) => {
   try {
@@ -112,8 +133,48 @@ projectsRouter.post('/', async (req, res, next) => {
       res.status(400).json({ error: parsed.error.flatten() });
       return;
     }
-    const project = await addProject(parsed.data);
-    res.status(201).json({ project });
+    const wantStream =
+      req.query.stream === '1' ||
+      req.query.stream === 'true' ||
+      String(req.headers.accept || '').includes('application/x-ndjson');
+
+    if (!wantStream) {
+      const project = await addProject(parsed.data);
+      res.status(201).json({ project });
+      return;
+    }
+
+    res.status(200);
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('X-Accel-Buffering', 'no');
+    if (typeof (res as { flushHeaders?: () => void }).flushHeaders === 'function') {
+      (res as { flushHeaders: () => void }).flushHeaders();
+    }
+
+    const writeEvent = (payload: unknown) => {
+      if (res.writableEnded) {
+        return;
+      }
+      res.write(`${JSON.stringify(payload)}\n`);
+    };
+
+    try {
+      const project = await addProject(parsed.data, (event) => writeEvent(event));
+      writeEvent({ type: 'done', project });
+      res.end();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const code = (error as { code?: string }).code;
+      const status = (error as { status?: number }).status;
+      writeEvent({
+        type: 'error',
+        error: message,
+        ...(typeof code === 'string' ? { code } : {}),
+        ...(typeof status === 'number' ? { status } : {}),
+      });
+      res.end();
+    }
   } catch (error) {
     next(error);
   }
@@ -210,6 +271,71 @@ projectsRouter.post('/:id/sync', async (req, res, next) => {
   try {
     const project = await syncProject(req.params.id);
     res.json({ project });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/projects/:id/branches — 列出本地 / 远程分支
+ */
+projectsRouter.get('/:id/branches', async (req, res, next) => {
+  try {
+    const result = await listBranchesForProject(req.params.id);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/projects/:id/checkout — body.branch 切换分支
+ * 查询参数 stream=1 时返回 NDJSON 进度流。
+ */
+projectsRouter.post('/:id/checkout', async (req, res, next) => {
+  try {
+    const branch = typeof req.body?.branch === 'string' ? req.body.branch.trim() : '';
+    if (!branch) {
+      res.status(400).json({ error: '缺少 branch' });
+      return;
+    }
+    const wantStream =
+      req.query.stream === '1' ||
+      req.query.stream === 'true' ||
+      String(req.headers.accept || '').includes('application/x-ndjson');
+
+    if (!wantStream) {
+      const project = await checkoutBranchForProject(req.params.id, branch);
+      res.json({ project });
+      return;
+    }
+
+    res.status(200);
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('X-Accel-Buffering', 'no');
+    if (typeof (res as { flushHeaders?: () => void }).flushHeaders === 'function') {
+      (res as { flushHeaders: () => void }).flushHeaders();
+    }
+
+    const writeEvent = (payload: unknown) => {
+      if (res.writableEnded) {
+        return;
+      }
+      res.write(`${JSON.stringify(payload)}\n`);
+    };
+
+    try {
+      const project = await checkoutBranchForProject(req.params.id, branch, (event) =>
+        writeEvent(event),
+      );
+      writeEvent({ type: 'done', project });
+      res.end();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      writeEvent({ type: 'error', error: message });
+      res.end();
+    }
   } catch (error) {
     next(error);
   }

@@ -4,6 +4,7 @@ import express, { type ErrorRequestHandler } from 'express';
 import { requireLocalLogin } from './require-auth.js';
 import { authRouter } from './routes/auth.js';
 import { billingRouter } from './routes/billing.js';
+import { categoriesRouter } from './routes/categories.js';
 import { projectsRouter } from './routes/projects.js';
 import { ROOT_DIR } from './store.js';
 
@@ -23,6 +24,7 @@ export function createApp() {
 
   app.use('/api/auth', authRouter);
   app.use('/api/billing', billingRouter);
+  app.use('/api/categories', requireLocalLogin, categoriesRouter);
   app.use('/api/projects', requireLocalLogin, projectsRouter);
 
   const clientDist = path.join(ROOT_DIR, 'client', 'dist');

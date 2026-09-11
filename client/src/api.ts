@@ -31,6 +31,14 @@ export type ProjectPhase = {
   summary: string;
 };
 
+export type Category = {
+  id: string;
+  name: string;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ProfileRuntimeView = {
   profile: StartProfile;
   runtime: {
@@ -57,6 +65,7 @@ export type Project = {
   openUrl: string | null;
   upstreamUrl: string | null;
   tags: string[];
+  categoryId: string | null;
   notes: string;
   exists: boolean;
   isGitRepo: boolean;
@@ -85,6 +94,8 @@ export type Project = {
   recentLogs: LogLine[];
   runtimeUrls: string[];
   hasAnalysis: boolean;
+  depsInstalled: boolean;
+  needsInstall: boolean;
 };
 
 /**

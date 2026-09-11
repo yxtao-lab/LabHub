@@ -11,6 +11,7 @@ const catalogProjectSchema = z.object({
   openUrl: z.string().nullable(),
   upstreamUrl: z.string().nullable(),
   tags: z.array(z.string()),
+  categoryId: z.string().nullable().optional(),
   notes: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -22,57 +23,91 @@ const catalogProjectSchema = z.object({
   currentPhase: z.string().nullable().optional(),
 });
 
+const catalogCategorySchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  sortOrder: z.number().int(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
 export const catalogBodySchema = z.object({
   projects: z.array(catalogProjectSchema),
+  categories: z.array(catalogCategorySchema).optional().default([]),
 });
 
 export type CatalogProject = z.infer<typeof catalogProjectSchema>;
+export type CatalogCategory = z.infer<typeof catalogCategorySchema>;
+export type CatalogData = {
+  projects: CatalogProject[];
+  categories: CatalogCategory[];
+};
+
+/**
+ * 解析 projects_json：兼容旧版「纯数组」与新版「{ projects, categories }」。
+ *
+ * @param raw - 数据库 JSON
+ * @returns 项目与分类
+ */
+function parseCatalogJson(raw: unknown): CatalogData {
+  try {
+    const parsed = typeof raw === 'string' ? (JSON.parse(raw) as unknown) : raw;
+    if (Array.isArray(parsed)) {
+      const result = z.array(catalogProjectSchema).safeParse(parsed);
+      return { projects: result.success ? result.data : [], categories: [] };
+    }
+    if (parsed && typeof parsed === 'object') {
+      const obj = parsed as { projects?: unknown; categories?: unknown };
+      const projectsResult = z.array(catalogProjectSchema).safeParse(obj.projects ?? []);
+      const categoriesResult = z.array(catalogCategorySchema).safeParse(obj.categories ?? []);
+      return {
+        projects: projectsResult.success ? projectsResult.data : [],
+        categories: categoriesResult.success ? categoriesResult.data : [],
+      };
+    }
+  } catch {
+    /* ignore */
+  }
+  return { projects: [], categories: [] };
+}
 
 /**
  * 读取用户云端清单。
  *
  * @param userId - 用户 id
- * @returns 项目元数据列表
+ * @returns 项目与分类元数据
  */
-export async function getCatalog(userId: string): Promise<CatalogProject[]> {
+export async function getCatalog(userId: string): Promise<CatalogData> {
   const row = (
     await query<{ projects_json: unknown }>('SELECT projects_json FROM catalogs WHERE user_id = $1', [
       userId,
     ])
   ).rows[0];
   if (!row) {
-    return [];
+    return { projects: [], categories: [] };
   }
-  try {
-    const parsed =
-      typeof row.projects_json === 'string'
-        ? (JSON.parse(row.projects_json) as unknown)
-        : row.projects_json;
-    const result = z.array(catalogProjectSchema).safeParse(parsed);
-    return result.success ? result.data : [];
-  } catch {
-    return [];
-  }
+  return parseCatalogJson(row.projects_json);
 }
 
 /**
  * 覆盖写入用户云端清单。
  *
  * @param userId - 用户 id
- * @param projects - 项目列表
- * @returns 写入后的列表
+ * @param data - 项目与分类
+ * @returns 写入后的数据
  */
-export async function putCatalog(
-  userId: string,
-  projects: CatalogProject[],
-): Promise<CatalogProject[]> {
+export async function putCatalog(userId: string, data: CatalogData): Promise<CatalogData> {
   const now = new Date().toISOString();
+  const payload: CatalogData = {
+    projects: data.projects,
+    categories: data.categories ?? [],
+  };
   await query(
     `INSERT INTO catalogs (user_id, projects_json, updated_at) VALUES ($1, $2::jsonb, $3)
      ON CONFLICT (user_id) DO UPDATE SET
        projects_json = EXCLUDED.projects_json,
        updated_at = EXCLUDED.updated_at`,
-    [userId, JSON.stringify(projects), now],
+    [userId, JSON.stringify(payload), now],
   );
-  return projects;
+  return payload;
 }

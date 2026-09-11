@@ -256,6 +256,7 @@ export function normalizeProjectRecord(record: ProjectRecord): ProjectRecord {
     phases: resolvePhases(record),
     currentPhase: record.currentPhase ?? null,
     tags: record.tags ?? [],
+    categoryId: record.categoryId ?? null,
     notes: record.notes ?? '',
   };
 }

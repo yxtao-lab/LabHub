@@ -6,16 +6,20 @@ import { hasProjectAnalysis } from './analysis.js';
 import { generateAnalysisOnFirstManage } from './analysis-deepseek.js';
 import { pushCatalogIfLoggedIn } from './catalog-sync.js';
 import { cloudFetchMe } from './cloud-client.js';
+import { detectDependencyState } from './dependency-state.js';
 import {
+  checkoutProjectBranch,
   cloneRepository,
   deriveProjectId,
   isGitRepo,
+  listProjectBranches,
   pullOrigin,
   readGitSummary,
   sanitizeId,
+  type GitCloneProgress,
 } from './git.js';
-import { extractRuntimeUrls } from './log-urls.js';
-import { openBrowserWhenReady } from './open-browser.js';
+import { extractRuntimeUrls, mergeDetectedAndConfiguredUrls } from './log-urls.js';
+import { openBrowserPreferDetected } from './open-browser.js';
 import { processManager } from './process-manager.js';
 import {
   DEFAULT_PROFILE_ID,
@@ -32,8 +36,9 @@ import {
   resolveStartProfiles,
   runtimeKey,
 } from './profiles.js';
-import { inferProjectProfiles, refreshRecordProfiles } from './package-profiles.js';
+import { inferProjectProfiles, refreshRecordProfiles, detectPackageManager, defaultInstallCommand, isGenericNpmInstall } from './package-profiles.js';
 import {
+  findCategory,
   findProject,
   loadProjects,
   PROJECTS_DIR,
@@ -56,6 +61,21 @@ const tagsSchema = z
   .union([z.array(z.string()), z.string()])
   .optional()
   .transform((value) => normalizeTags(value));
+
+const categoryIdSchema = z
+  .string()
+  .nullable()
+  .optional()
+  .transform((value) => {
+    if (value === undefined) {
+      return undefined;
+    }
+    if (value === null) {
+      return null;
+    }
+    const trimmed = value.trim();
+    return trimmed || null;
+  });
 
 const startProfileSchema = z.object({
   id: z.string().min(1),
@@ -86,16 +106,17 @@ export const addProjectSchema = z.object({
   repoUrl: z.string().min(1),
   id: z.string().min(1).optional(),
   name: z.string().min(1).optional(),
-  branch: z.string().min(1).default('main'),
-  startCommand: z.string().min(1).default('npm run dev'),
+  branch: z.string().default(''),
+  startCommand: z.string().default(''),
   installCommand: z.string().default('npm install'),
   openUrl: z.string().url().nullable().optional(),
   upstreamUrl: z.string().nullable().optional(),
   tags: tagsSchema,
+  categoryId: categoryIdSchema,
   notes: z.string().optional(),
   localPath: z.string().optional(),
   shallow: z.boolean().default(true),
-  skipInstall: z.boolean().default(false),
+  skipInstall: z.boolean().default(true),
   startProfiles: z.array(startProfileSchema).optional(),
   defaultProfileId: z.string().nullable().optional(),
   buildProfiles: z.array(buildProfileSchema).optional(),
@@ -111,6 +132,7 @@ export const updateProjectSchema = z.object({
   openUrl: z.string().url().nullable().optional(),
   upstreamUrl: z.string().nullable().optional(),
   tags: tagsSchema,
+  categoryId: categoryIdSchema,
   notes: z.string().optional(),
   branch: z.string().min(1).optional(),
   startProfiles: z.array(startProfileSchema).optional(),
@@ -122,11 +144,21 @@ export const updateProjectSchema = z.object({
 });
 
 /**
- * 聚合多模式运行态：任一 running/starting → running/starting；否则取 error 或 stopped。
+ * 校验并规范化 categoryId；空值视为未分类。
  *
- * @param views - 各模式运行视图
- * @returns 聚合态
+ * @param categoryId - 请求中的分类 id
+ * @returns 合法 categoryId 或 null
+ * @throws {Error} 分类不存在时抛出
  */
+function resolveCategoryId(categoryId: string | null | undefined): string | null {
+  if (categoryId === undefined || categoryId === null || categoryId === '') {
+    return null;
+  }
+  if (!findCategory(categoryId)) {
+    throw new Error(`分类不存在：${categoryId}`);
+  }
+  return categoryId;
+}
 function aggregateRuntime(views: ProfileRuntimeView[]): RuntimeState {
   if (views.some((item) => item.runtime.status === 'starting')) {
     return { status: 'starting', pid: null, startedAt: null, exitedAt: null, exitCode: null, error: null };
@@ -205,28 +237,33 @@ export async function toProjectView(record: ProjectRecord): Promise<ProjectView>
   const defaultBuildProfileId = resolveDefaultBuildProfileId(normalized, buildProfiles);
 
   const profileRuntimes: ProfileRuntimeView[] = [];
-  const allUrls: string[] = [];
   const allLogs: LogLine[] = [];
 
   for (const profile of startProfiles) {
     const key = runtimeKey(normalized.id, profile.id);
-    const recentLogs = processManager.getLogs(key, 80);
+    const recentLogs = processManager.getLogs(key, 120);
     const runtimeUrls = extractRuntimeUrls(recentLogs);
-    const probeUrls = [profile.openUrl, ...runtimeUrls].filter(
-      (item): item is string => Boolean(item),
-    );
+    const probeUrls = mergeDetectedAndConfiguredUrls(runtimeUrls, [profile.openUrl]);
     const runtime = await processManager.getRuntime(key, probeUrls);
     profileRuntimes.push({
       profile,
       runtime: { ...runtime, profileId: profile.id },
       runtimeUrls,
     });
-    allUrls.push(...probeUrls.filter(Boolean));
     allLogs.push(...recentLogs);
   }
 
   allLogs.sort((a, b) => a.ts.localeCompare(b.ts));
-  const uniqueUrls = [...new Set(allUrls.filter(Boolean))];
+  const uniqueUrls = mergeDetectedAndConfiguredUrls(
+    profileRuntimes.flatMap((item) => item.runtimeUrls),
+    [
+      normalized.openUrl,
+      ...profileRuntimes.map((item) => item.profile.openUrl),
+    ],
+  );
+  const dependency = exists
+    ? detectDependencyState(absolutePath)
+    : { depsInstalled: false, needsInstall: false };
 
   return {
     ...normalized,
@@ -241,6 +278,8 @@ export async function toProjectView(record: ProjectRecord): Promise<ProjectView>
     recentLogs: allLogs.slice(-30),
     runtimeUrls: uniqueUrls,
     hasAnalysis: hasProjectAnalysis(normalized.path),
+    depsInstalled: dependency.depsInstalled,
+    needsInstall: dependency.needsInstall,
     startProfiles,
     defaultProfileId,
     buildProfiles,
@@ -284,16 +323,50 @@ export async function ensureComprehensiveProfiles(): Promise<string[]> {
   return updated;
 }
 
+/** 添加项目过程进度事件（供流式接口推送） */
+export type AddProjectProgressEvent =
+  | {
+      type: 'status';
+      phase: 'prepare' | 'clone' | 'install' | 'analyze' | 'done';
+      message: string;
+    }
+  | {
+      type: 'clone-progress';
+      stage: string;
+      percent: number;
+      received: number;
+      total: number;
+      remaining: number;
+      speed: string | null;
+      raw: string;
+    }
+  | {
+      type: 'install-log';
+      line: string;
+    };
+
+export type AddProjectProgressHandler = (event: AddProjectProgressEvent) => void;
+
 /**
  * 通过 GitHub/Gitee 地址克隆并登记；或挂载已有本地路径。
  *
  * @param input - 校验后的入参
+ * @param onProgress - 可选进度回调（流式登记用）
  * @returns 新建项目视图
  * @throws {Error} id 冲突或克隆失败时抛出
  */
 export async function addProject(
   input: z.infer<typeof addProjectSchema>,
+  onProgress?: AddProjectProgressHandler,
 ): Promise<ProjectView> {
+  const emit = (event: AddProjectProgressEvent) => {
+    try {
+      onProgress?.(event);
+    } catch {
+      // 忽略进度回调异常，避免中断主流程
+    }
+  };
+
   const me = await cloudFetchMe();
   if (me?.projectLimit != null) {
     const currentCount = loadProjects().length;
@@ -315,8 +388,10 @@ export async function addProject(
   const now = new Date().toISOString();
   let relativePath: string;
   let absolutePath: string;
+  let branch = input.branch?.trim() || '';
 
   if (input.localPath) {
+    emit({ type: 'status', phase: 'prepare', message: '正在挂载本地路径…' });
     absolutePath = path.isAbsolute(input.localPath)
       ? input.localPath
       : path.resolve(PROJECTS_DIR, '..', input.localPath);
@@ -324,31 +399,83 @@ export async function addProject(
       throw new Error(`本地路径不存在：${absolutePath}`);
     }
     relativePath = absolutePath;
+    if (!branch) {
+      const summary = await readGitSummary(absolutePath);
+      branch = summary?.branch || 'main';
+    }
   } else {
     relativePath = path.join('projects', id);
     absolutePath = path.join(PROJECTS_DIR, id);
-    await cloneRepository({
-      repoUrl: input.repoUrl,
-      targetDir: absolutePath,
-      branch: input.branch,
-      shallow: input.shallow,
-      upstreamUrl: input.upstreamUrl ?? null,
-    });
+    if (fs.existsSync(absolutePath)) {
+      // 上次已克隆成功但登记失败时，直接挂载已有目录，避免「目标目录已存在」
+      if (!isGitRepo(absolutePath)) {
+        throw new Error(
+          `目标目录已存在但不是 Git 仓库：${absolutePath}。请手动清理后重试，或换项目 id。`,
+        );
+      }
+      emit({
+        type: 'status',
+        phase: 'prepare',
+        message: '检测到本地已有克隆，正在登记…',
+      });
+      const summary = await readGitSummary(absolutePath);
+      if (!branch) {
+        branch = summary?.branch || 'main';
+      }
+      if (summary?.origin) {
+        const normalize = (url: string) =>
+          url.trim().replace(/\.git$/i, '').replace(/\/$/, '').toLowerCase();
+        if (normalize(summary.origin) !== normalize(input.repoUrl)) {
+          throw new Error(
+            `本地目录 origin（${summary.origin}）与填写的仓库地址不一致。请删除 ${absolutePath} 后重新克隆。`,
+          );
+        }
+      }
+    } else {
+      emit({ type: 'status', phase: 'clone', message: '开始克隆远程仓库…' });
+      const cloned = await cloneRepository({
+        repoUrl: input.repoUrl,
+        targetDir: absolutePath,
+        branch: branch || null,
+        shallow: input.shallow,
+        upstreamUrl: input.upstreamUrl ?? null,
+        onStatus: (message) => emit({ type: 'status', phase: 'clone', message }),
+        onProgress: (progress: GitCloneProgress) =>
+          emit({
+            type: 'clone-progress',
+            stage: progress.stage,
+            percent: progress.percent,
+            received: progress.received,
+            total: progress.total,
+            remaining: progress.remaining,
+            speed: progress.speed,
+            raw: progress.raw,
+          }),
+      });
+      branch = cloned.branch;
+      emit({
+        type: 'status',
+        phase: 'clone',
+        message: `克隆完成（分支 ${branch}）`,
+      });
+    }
   }
 
+  emit({ type: 'status', phase: 'analyze', message: '正在分析启动 / 构建模式…' });
   const inferred = inferProjectProfiles(absolutePath, {
     openUrl: input.openUrl ?? null,
     previous: {
       id,
       name: input.name ?? id,
       repoUrl: input.repoUrl,
-      branch: input.branch,
+      branch,
       path: relativePath,
-      startCommand: input.startCommand,
+      startCommand: input.startCommand.trim(),
       installCommand: input.installCommand,
       openUrl: input.openUrl ?? null,
       upstreamUrl: input.upstreamUrl ?? null,
       tags: normalizeTags(input.tags),
+      categoryId: resolveCategoryId(input.categoryId),
       createdAt: now,
       updatedAt: now,
       notes: input.notes ?? '',
@@ -360,16 +487,20 @@ export async function addProject(
   });
 
   const userInstall = (input.installCommand || '').trim();
-  const installCommand =
-    !userInstall ||
-    (inferred.kind === 'python' && /^npm install$/i.test(userInstall)) ||
-    (inferred.kind === 'node' && /^npm install$/i.test(userInstall) && inferred.installCommand !== userInstall)
-      ? inferred.installCommand
-      : userInstall || inferred.installCommand;
+  const installCommand = isGenericNpmInstall(userInstall)
+    ? inferred.installCommand
+    : userInstall || inferred.installCommand;
 
   if (!input.skipInstall && installCommand) {
     if (inferred.kind === 'node' || inferred.kind === 'python') {
-      await runShell(installCommand, absolutePath);
+      emit({
+        type: 'status',
+        phase: 'install',
+        message: `正在安装依赖：${installCommand}`,
+      });
+      await runShell(installCommand, absolutePath, (line) =>
+        emit({ type: 'install-log', line }),
+      );
     }
   }
 
@@ -377,13 +508,14 @@ export async function addProject(
     id,
     name: input.name ?? id,
     repoUrl: input.repoUrl,
-    branch: input.branch,
+    branch,
     path: relativePath,
     startCommand: inferred.startCommand,
     installCommand,
     openUrl: input.openUrl ?? null,
     upstreamUrl: input.upstreamUrl ?? null,
     tags: normalizeTags(input.tags),
+    categoryId: resolveCategoryId(input.categoryId),
     createdAt: now,
     updatedAt: now,
     notes: input.notes ?? '',
@@ -395,12 +527,14 @@ export async function addProject(
     currentPhase: input.currentPhase ?? null,
   });
   upsertProject(record);
+  emit({ type: 'status', phase: 'analyze', message: '正在生成项目分析…' });
   try {
     await generateAnalysisOnFirstManage(record);
   } catch (error) {
     console.warn('[labhub] 首次托管分析失败（不阻断登记）', error);
   }
   await pushCatalogIfLoggedIn();
+  emit({ type: 'status', phase: 'done', message: '登记完成' });
   return toProjectView(record);
 }
 
@@ -424,6 +558,10 @@ export async function updateProject(
     ...current,
     ...patch,
     tags: patch.tags !== undefined ? normalizeTags(patch.tags) : normalizeTags(current.tags),
+    categoryId:
+      patch.categoryId !== undefined
+        ? resolveCategoryId(patch.categoryId)
+        : current.categoryId ?? null,
     updatedAt: new Date().toISOString(),
   });
   upsertProject(next);
@@ -454,10 +592,9 @@ export async function syncProfilesFromPackage(id: string): Promise<ProjectView> 
   const next = normalizeProjectRecord({
     ...current,
     startCommand: inferred.startCommand,
-    installCommand:
-      current.installCommand && !/^npm install$/i.test(current.installCommand)
-        ? current.installCommand
-        : inferred.installCommand,
+    installCommand: isGenericNpmInstall(current.installCommand)
+      ? inferred.installCommand
+      : current.installCommand || inferred.installCommand,
     startProfiles: inferred.startProfiles,
     buildProfiles: inferred.buildProfiles,
     defaultProfileId: inferred.defaultProfileId,
@@ -518,20 +655,25 @@ export async function startProject(
   if (!fs.existsSync(absolutePath)) {
     throw new Error(`项目目录不存在，请先重新拉取：${absolutePath}`);
   }
+  const dependency = detectDependencyState(absolutePath);
+  if (dependency.needsInstall) {
+    throw new Error('请先点击「安装依赖」，完成后再启动项目');
+  }
   const profiles = resolveStartProfiles(current);
   const profile = findStartProfile(
     profiles,
     profileId || resolveDefaultProfileId(current, profiles),
   );
   const cwd = resolveProfileCwd(absolutePath, profile);
-  const probeUrls = [profile.openUrl].filter((item): item is string => Boolean(item));
   const key = runtimeKey(id, profile.id);
+  const probeUrls = [profile.openUrl].filter((item): item is string => Boolean(item));
   await processManager.start(key, cwd, profile.command, probeUrls);
-  if (profile.openUrl) {
-    void openBrowserWhenReady(profile.openUrl).catch(() => {
-      // 打开失败不阻断启动
-    });
-  }
+  void openBrowserPreferDetected({
+    getDetectedUrls: () => extractRuntimeUrls(processManager.getLogs(key, 200)),
+    fallbackUrl: profile.openUrl,
+  }).catch(() => {
+    // 打开失败不阻断启动
+  });
   return toProjectView(current);
 }
 
@@ -591,10 +733,24 @@ export async function installProject(id: string): Promise<ProjectView> {
   if (!fs.existsSync(absolutePath)) {
     throw new Error(`项目目录不存在：${absolutePath}`);
   }
-  const command = current.installCommand || 'npm install';
+  let command = current.installCommand || 'npm install';
+  if (isGenericNpmInstall(command)) {
+    const pm = detectPackageManager(absolutePath);
+    const detected = defaultInstallCommand(pm);
+    if (detected !== command) {
+      command = detected;
+      const next = normalizeProjectRecord({
+        ...current,
+        installCommand: detected,
+        updatedAt: new Date().toISOString(),
+      });
+      upsertProject(next);
+      await pushCatalogIfLoggedIn();
+    }
+  }
   const key = runtimeKey(id, '__install__');
   await processManager.start(key, absolutePath, command, []);
-  return toProjectView(current);
+  return toProjectView(findProject(id) ?? current);
 }
 
 /**
@@ -616,6 +772,10 @@ export async function buildProject(
   const absolutePath = resolveProjectPath(current.path);
   if (!fs.existsSync(absolutePath)) {
     throw new Error(`项目目录不存在：${absolutePath}`);
+  }
+  const dependency = detectDependencyState(absolutePath);
+  if (dependency.needsInstall) {
+    throw new Error('请先点击「安装依赖」，完成后再构建');
   }
   const profiles = resolveBuildProfiles(current);
   const profile = findBuildProfile(
@@ -747,6 +907,97 @@ export async function syncProject(id: string): Promise<ProjectView> {
 }
 
 /**
+ * 列出项目本地 / 远程分支。
+ *
+ * @param id - 项目 id
+ * @returns 当前分支与分支列表
+ * @throws {Error} 项目或仓库不存在时抛出
+ */
+export async function listBranchesForProject(id: string): Promise<{
+  current: string | null;
+  branches: string[];
+}> {
+  const current = findProject(id);
+  if (!current) {
+    throw new Error(`项目不存在：${id}`);
+  }
+  const absolutePath = resolveProjectPath(current.path);
+  if (!fs.existsSync(absolutePath)) {
+    throw new Error(`项目目录不存在：${absolutePath}`);
+  }
+  return listProjectBranches(absolutePath);
+}
+
+/**
+ * 切换项目分支，并回写清单中的 branch 字段。
+ *
+ * @param id - 项目 id
+ * @param branch - 目标分支
+ * @param onProgress - 可选进度回调（流式切分支用）
+ * @returns 更新后视图
+ * @throws {Error} 运行中或切换失败时抛出
+ */
+export async function checkoutBranchForProject(
+  id: string,
+  branch: string,
+  onProgress?: AddProjectProgressHandler,
+): Promise<ProjectView> {
+  const emit = (event: AddProjectProgressEvent) => {
+    try {
+      onProgress?.(event);
+    } catch {
+      // 忽略进度回调异常
+    }
+  };
+
+  const current = findProject(id);
+  if (!current) {
+    throw new Error(`项目不存在：${id}`);
+  }
+  const view = await toProjectView(current);
+  if (view.runtime.status === 'running' || view.runtime.status === 'starting') {
+    throw new Error('请先停止项目再切换分支');
+  }
+  const absolutePath = resolveProjectPath(current.path);
+  if (!fs.existsSync(absolutePath)) {
+    throw new Error(`项目目录不存在：${absolutePath}`);
+  }
+
+  emit({
+    type: 'status',
+    phase: 'clone',
+    message: `正在切换到分支 ${branch.trim()}…`,
+  });
+  const result = await checkoutProjectBranch(absolutePath, branch, {
+    onStatus: (message) => emit({ type: 'status', phase: 'clone', message }),
+    onProgress: (progress) =>
+      emit({
+        type: 'clone-progress',
+        stage: progress.stage,
+        percent: progress.percent,
+        received: progress.received,
+        total: progress.total,
+        remaining: progress.remaining,
+        speed: progress.speed,
+        raw: progress.raw,
+      }),
+  });
+  emit({
+    type: 'status',
+    phase: 'done',
+    message: `已切换到 ${result.branch}`,
+  });
+  const next = normalizeProjectRecord({
+    ...current,
+    branch: result.branch,
+    updatedAt: new Date().toISOString(),
+  });
+  upsertProject(next);
+  await pushCatalogIfLoggedIn();
+  return toProjectView(next);
+}
+
+/**
  * 在项目目录用 shell 执行命令（安装依赖等）。
  *
  * @param commandLine - 完整命令行
@@ -754,17 +1005,50 @@ export async function syncProject(id: string): Promise<ProjectView> {
  * @returns {Promise<void>}
  * @throws {Error} 非 0 退出时抛出
  */
-function runShell(commandLine: string, cwd: string): Promise<void> {
+/**
+ * 在项目目录执行 shell 命令；可把输出按行回调。
+ *
+ * @param commandLine - 命令行
+ * @param cwd - 工作目录
+ * @param onLine - 可选输出行回调
+ * @returns {Promise<void>}
+ * @throws {Error} 非 0 退出码时抛出
+ */
+function runShell(
+  commandLine: string,
+  cwd: string,
+  onLine?: (line: string) => void,
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(commandLine, {
       cwd,
       shell: true,
-      stdio: 'inherit',
+      stdio: onLine ? ['ignore', 'pipe', 'pipe'] : 'inherit',
       windowsHide: true,
       env: process.env,
     });
+    let buffer = '';
+    const flush = (chunk: Buffer) => {
+      if (!onLine) {
+        return;
+      }
+      buffer += chunk.toString();
+      const parts = buffer.split(/\r?\n/);
+      buffer = parts.pop() ?? '';
+      for (const line of parts) {
+        const trimmed = line.trim();
+        if (trimmed) {
+          onLine(trimmed.slice(0, 240));
+        }
+      }
+    };
+    child.stdout?.on('data', flush);
+    child.stderr?.on('data', flush);
     child.on('error', reject);
     child.on('close', (code) => {
+      if (buffer.trim() && onLine) {
+        onLine(buffer.trim().slice(0, 240));
+      }
       if (code === 0) {
         resolve();
         return;

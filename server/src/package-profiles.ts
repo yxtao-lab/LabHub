@@ -7,6 +7,9 @@ import {
   isPythonProject,
 } from './python-profiles.js';
 
+/** Node 包管理器 */
+export type NodePackageManager = 'pnpm' | 'yarn' | 'npm' | 'bun';
+
 /** 从仓库清单推断出的启动 / 构建模式 */
 export type InferredPackageProfiles = {
   startProfiles: StartProfile[];
@@ -17,8 +20,34 @@ export type InferredPackageProfiles = {
   installCommand: string;
   /** 生态类型 */
   kind: 'node' | 'python' | 'unknown';
-  packageManager: 'pnpm' | 'yarn' | 'npm' | 'uv' | 'poetry' | 'pipenv' | 'pip' | 'unknown';
+  packageManager: NodePackageManager | 'uv' | 'poetry' | 'pipenv' | 'pip' | 'unknown';
 };
+
+/** 用于识别包管理器 / 安装命令的清单与锁文件 */
+const COMMAND_EVIDENCE_FILES = [
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
+  'yarn.lock',
+  'bun.lock',
+  'bun.lockb',
+  'package-lock.json',
+  'npm-shrinkwrap.json',
+  'package.json',
+  'pyproject.toml',
+  'requirements.txt',
+  'requirements-dev.txt',
+  'poetry.lock',
+  'uv.lock',
+  'Pipfile',
+  'go.mod',
+  'Cargo.toml',
+  'composer.json',
+  'Makefile',
+  'docker-compose.yml',
+  'docker-compose.yaml',
+  'compose.yml',
+  'compose.yaml',
+] as const;
 
 const START_SCRIPT_RE = /^(dev|start|serve|preview)(:.+)?$/i;
 const BUILD_SCRIPT_RE = /^(build|package|bundle|compile|dist)(:.+)?$/i;
@@ -28,19 +57,81 @@ const EXCLUDED_SCRIPT_RE =
   /:(watch|test|check|typecheck|lint|analyze|size|report)$/i;
 
 /**
- * 探测项目包管理器。
+ * 探测项目包管理器（锁文件优先于 packageManager 字段与 LabHub 登记）。
  *
  * @param root - 项目根目录
  * @returns 包管理器
  */
-export function detectPackageManager(root: string): 'pnpm' | 'yarn' | 'npm' {
-  if (fs.existsSync(path.join(root, 'pnpm-lock.yaml'))) {
+export function detectPackageManager(root: string): NodePackageManager {
+  if (
+    fs.existsSync(path.join(root, 'pnpm-lock.yaml')) ||
+    fs.existsSync(path.join(root, 'pnpm-workspace.yaml'))
+  ) {
     return 'pnpm';
   }
   if (fs.existsSync(path.join(root, 'yarn.lock'))) {
     return 'yarn';
   }
+  if (
+    fs.existsSync(path.join(root, 'bun.lockb')) ||
+    fs.existsSync(path.join(root, 'bun.lock'))
+  ) {
+    return 'bun';
+  }
+  const pkgPath = path.join(root, 'package.json');
+  if (fs.existsSync(pkgPath)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(pkgPath, 'utf8')) as {
+        packageManager?: string;
+      };
+      const specifier = String(raw.packageManager ?? '').toLowerCase();
+      if (specifier.startsWith('pnpm')) {
+        return 'pnpm';
+      }
+      if (specifier.startsWith('yarn')) {
+        return 'yarn';
+      }
+      if (specifier.startsWith('bun')) {
+        return 'bun';
+      }
+      const blob = JSON.stringify(raw);
+      if (blob.includes('workspace:')) {
+        return 'pnpm';
+      }
+    } catch {
+      // ignore
+    }
+  }
   return 'npm';
+}
+
+/**
+ * 包管理器对应的默认安装命令。
+ *
+ * @param pm - 包管理器
+ * @returns 安装命令
+ */
+export function defaultInstallCommand(pm: NodePackageManager): string {
+  if (pm === 'pnpm') {
+    return 'pnpm install';
+  }
+  if (pm === 'yarn') {
+    return 'yarn';
+  }
+  if (pm === 'bun') {
+    return 'bun install';
+  }
+  return 'npm install';
+}
+
+/**
+ * 是否为添加表单留下的默认 npm install（可被锁文件覆盖）。
+ *
+ * @param command - 安装命令
+ * @returns 是否为通用默认值
+ */
+export function isGenericNpmInstall(command: string | undefined | null): boolean {
+  return !command || /^npm install$/i.test(command.trim());
 }
 
 /**
@@ -67,14 +158,69 @@ function scriptToProfileId(scriptName: string): string {
  * @param scriptName - scripts 键名
  * @returns 命令字符串
  */
-function runScriptCommand(pm: 'pnpm' | 'yarn' | 'npm', scriptName: string): string {
+function runScriptCommand(pm: NodePackageManager, scriptName: string): string {
   if (pm === 'pnpm') {
     return `pnpm run ${scriptName}`;
   }
   if (pm === 'yarn') {
     return `yarn ${scriptName}`;
   }
+  if (pm === 'bun') {
+    return `bun run ${scriptName}`;
+  }
   return `npm run ${scriptName}`;
+}
+
+/**
+ * 按包管理器组装 scripts 调用命令（供分析文档使用）。
+ *
+ * @param pm - 包管理器
+ * @param scriptName - scripts 键名
+ * @returns 命令
+ */
+export function buildScriptRunCommand(pm: string, scriptName: string): string {
+  if (pm === 'pnpm' || pm === 'yarn' || pm === 'npm' || pm === 'bun') {
+    return runScriptCommand(pm, scriptName);
+  }
+  return `npm run ${scriptName}`;
+}
+
+/**
+ * 安装命令所属的包管理器族（忽略额外参数）。
+ *
+ * @param command - 安装命令
+ * @returns 如 pnpm / npm；无法识别时为空串
+ */
+export function installCommandFamily(command: string | undefined | null): string {
+  const text = String(command ?? '').trim().toLowerCase();
+  if (!text) {
+    return '';
+  }
+  if (text.startsWith('pnpm')) {
+    return 'pnpm';
+  }
+  if (text.startsWith('yarn')) {
+    return 'yarn';
+  }
+  if (text.startsWith('bun')) {
+    return 'bun';
+  }
+  if (text.startsWith('npm')) {
+    return 'npm';
+  }
+  if (text.startsWith('uv')) {
+    return 'uv';
+  }
+  if (text.startsWith('poetry')) {
+    return 'poetry';
+  }
+  if (text.startsWith('pipenv')) {
+    return 'pipenv';
+  }
+  if (/\bpip\b/.test(text)) {
+    return 'pip';
+  }
+  return text.split(/\s+/)[0] ?? '';
 }
 
 /**
@@ -234,14 +380,22 @@ export function inferProfilesFromPackageJson(
   });
 
   const openUrl = options.openUrl ?? options.previous?.openUrl ?? null;
-  const installCommand =
-    options.previous?.installCommand ||
-    (pm === 'pnpm' ? 'pnpm install' : pm === 'yarn' ? 'yarn' : 'npm install');
+  const detectedInstall = defaultInstallCommand(pm);
+  const previousInstall = options.previous?.installCommand?.trim() || '';
+  const installCommand = isGenericNpmInstall(previousInstall)
+    ? detectedInstall
+    : previousInstall;
 
   if (startProfiles.length === 0) {
     const command =
       options.previous?.startCommand ||
-      (pm === 'pnpm' ? 'pnpm run dev' : pm === 'yarn' ? 'yarn dev' : 'npm run dev');
+      (pm === 'pnpm'
+        ? 'pnpm run dev'
+        : pm === 'yarn'
+          ? 'yarn dev'
+          : pm === 'bun'
+            ? 'bun run dev'
+            : 'npm run dev');
     startProfiles = [
       {
         id: DEFAULT_PROFILE_ID,
@@ -264,7 +418,13 @@ export function inferProfilesFromPackageJson(
 
   if (buildProfiles.length === 0) {
     const command =
-      pm === 'pnpm' ? 'pnpm run build' : pm === 'yarn' ? 'yarn build' : 'npm run build';
+      pm === 'pnpm'
+        ? 'pnpm run build'
+        : pm === 'yarn'
+          ? 'yarn build'
+          : pm === 'bun'
+            ? 'bun run build'
+            : 'npm run build';
     buildProfiles = [
       {
         id: DEFAULT_BUILD_PROFILE_ID,
@@ -362,6 +522,149 @@ export function inferProjectProfiles(
   };
 }
 
+/** 分析文档用的已识别命令 */
+export type AnalysisCommandSnapshot = {
+  kind: InferredPackageProfiles['kind'];
+  packageManager: InferredPackageProfiles['packageManager'];
+  installCommand: string;
+  startCommand: string;
+  defaultBuildCommand: string;
+  startProfiles: InferredPackageProfiles['startProfiles'];
+  buildProfiles: InferredPackageProfiles['buildProfiles'];
+  /** package.json scripts 对应的可执行命令 */
+  scriptCommands: Record<string, string>;
+  /** 其它生态常见命令（Go / Cargo / Compose 等） */
+  extraCommands: string[];
+  evidence: string[];
+  catalogInstallCommand: string | null;
+  catalogInstallMismatch: boolean;
+};
+
+/**
+ * 收集仓库中用于识别命令的证据文件名。
+ *
+ * @param root - 项目根
+ * @returns 存在的文件名
+ */
+function collectCommandEvidence(root: string): string[] {
+  return COMMAND_EVIDENCE_FILES.filter((name) => fs.existsSync(path.join(root, name)));
+}
+
+/**
+ * 从 Makefile 抽取常见目标对应的 make 命令。
+ *
+ * @param root - 项目根
+ * @returns 如 make install
+ */
+function collectMakefileCommands(root: string): string[] {
+  const filePath = path.join(root, 'Makefile');
+  if (!fs.existsSync(filePath)) {
+    return [];
+  }
+  try {
+    const text = fs.readFileSync(filePath, 'utf8');
+    const names = new Set<string>();
+    const re = /^([A-Za-z][A-Za-z0-9_-]*):/gm;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(text)) !== null) {
+      const name = match[1]!;
+      if (/^(dev|start|run|serve|preview|build|package|dist|install|test|lint)$/i.test(name)) {
+        names.add(`make ${name}`);
+      }
+    }
+    return [...names];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 非 Node/Python 清单上的常用命令（仅作分析证据，不覆盖已识别的安装命令）。
+ *
+ * @param root - 项目根
+ * @returns 命令列表
+ */
+function collectExtraEcosystemCommands(root: string): string[] {
+  const extras: string[] = [];
+  extras.push(...collectMakefileCommands(root));
+  if (fs.existsSync(path.join(root, 'go.mod'))) {
+    extras.push('go mod download', 'go run .', 'go test ./...');
+  }
+  if (fs.existsSync(path.join(root, 'Cargo.toml'))) {
+    extras.push('cargo fetch', 'cargo run', 'cargo build');
+  }
+  if (fs.existsSync(path.join(root, 'composer.json'))) {
+    extras.push('composer install');
+  }
+  if (
+    fs.existsSync(path.join(root, 'docker-compose.yml')) ||
+    fs.existsSync(path.join(root, 'docker-compose.yaml')) ||
+    fs.existsSync(path.join(root, 'compose.yml')) ||
+    fs.existsSync(path.join(root, 'compose.yaml'))
+  ) {
+    extras.push('docker compose up');
+  }
+  return extras;
+}
+
+/**
+ * 列出 package.json scripts 对应的可执行命令。
+ *
+ * @param root - 项目根
+ * @returns script 名 → 命令
+ */
+function listRecognizedScriptCommands(root: string): Record<string, string> {
+  if (!fs.existsSync(path.join(root, 'package.json'))) {
+    return {};
+  }
+  const pm = detectPackageManager(root);
+  const scripts = readPackageScripts(root);
+  const out: Record<string, string> = {};
+  for (const name of Object.keys(scripts)) {
+    out[name] = runScriptCommand(pm, name);
+  }
+  return out;
+}
+
+/**
+ * 从仓库锁文件 / 清单识别安装与启停命令（优先于 LabHub 可能过时的登记）。
+ *
+ * @param root - 项目根
+ * @param record - 可选 LabHub 登记
+ * @returns 识别结果
+ */
+export function resolveAnalysisCommands(
+  root: string,
+  record?: ProjectRecord | null,
+): AnalysisCommandSnapshot {
+  const inferred = inferProjectProfiles(root, {
+    openUrl: record?.openUrl,
+  });
+  const catalogInstall = record?.installCommand?.trim() || null;
+  const catalogFamily = installCommandFamily(catalogInstall);
+  const detectedFamily = installCommandFamily(inferred.installCommand);
+  const catalogInstallMismatch = Boolean(
+    catalogFamily && detectedFamily && catalogFamily !== detectedFamily,
+  );
+  return {
+    kind: inferred.kind,
+    packageManager: inferred.packageManager,
+    installCommand: inferred.installCommand,
+    startCommand: inferred.startCommand,
+    defaultBuildCommand:
+      inferred.buildProfiles.find((item) => item.id === DEFAULT_BUILD_PROFILE_ID)?.command ??
+      inferred.buildProfiles[0]?.command ??
+      '',
+    startProfiles: inferred.startProfiles,
+    buildProfiles: inferred.buildProfiles,
+    scriptCommands: listRecognizedScriptCommands(root),
+    extraCommands: collectExtraEcosystemCommands(root),
+    evidence: collectCommandEvidence(root),
+    catalogInstallCommand: catalogInstall,
+    catalogInstallMismatch,
+  };
+}
+
 /**
  * 比较两套模式的命令集合是否一致。
  *
@@ -442,6 +745,13 @@ export function needsProfileRefresh(record: ProjectRecord, root: string): boolea
   ) {
     return true;
   }
+  if (
+    isGenericNpmInstall(record.installCommand) &&
+    inferred.installCommand &&
+    inferred.installCommand !== (record.installCommand || 'npm install')
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -477,7 +787,9 @@ export function refreshRecordProfiles(
   return {
     ...record,
     startCommand: inferred.startCommand,
-    installCommand: record.installCommand || inferred.installCommand,
+    installCommand: isGenericNpmInstall(record.installCommand)
+      ? inferred.installCommand
+      : record.installCommand || inferred.installCommand,
     startProfiles,
     buildProfiles,
     defaultProfileId: inferred.defaultProfileId,

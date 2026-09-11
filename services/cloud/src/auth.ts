@@ -372,14 +372,14 @@ export async function setUserPassword(userId: string, password: string): Promise
 export async function toMeView(user: AuthUser) {
   const resolved = await resolveUserPlan(user.id);
   const quota = await getRemainingAiQuota(user.id);
-  const projects = await getCatalog(user.id);
+  const catalog = await getCatalog(user.id);
   return {
     id: user.id,
     phoneMasked: maskPhone(user.phone),
     inviteCode: user.inviteCode,
     projectLimit: resolved.projectLimit,
-    projectCount: projects.length,
-    projectRemaining: Math.max(0, resolved.projectLimit - projects.length),
+    projectCount: catalog.projects.length,
+    projectRemaining: Math.max(0, resolved.projectLimit - catalog.projects.length),
     planId: resolved.planId,
     planName: resolved.planName,
     planExpiresAt: resolved.planExpiresAt,

@@ -34,28 +34,115 @@ export function normalizeRuntimeUrl(raw: string): string | null {
 }
 
 /**
- * 从日志行中提取去重后的运行地址列表。
+ * 判断是否为本机回环地址（优先展示 / 打开）。
+ *
+ * @param url - 规范化 URL
+ * @returns 是否回环
+ */
+export function isLoopbackUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname;
+    return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 对探测到的地址排序：回环优先，同组保持发现顺序（较新的在后则反转取末尾时已偏新）。
+ *
+ * @param urls - 地址列表
+ * @returns 排序后的新数组
+ */
+export function rankRuntimeUrls(urls: string[]): string[] {
+  const unique = [...new Set(urls.filter(Boolean))];
+  return unique.sort((a, b) => {
+    const la = isLoopbackUrl(a) ? 0 : 1;
+    const lb = isLoopbackUrl(b) ? 0 : 1;
+    if (la !== lb) {
+      return la - lb;
+    }
+    return 0;
+  });
+}
+
+/**
+ * 选取最适合打开浏览器的地址。
+ *
+ * @param urls - 探测到的地址
+ * @returns 首选 URL；无则 null
+ */
+export function pickPrimaryRuntimeUrl(urls: string[]): string | null {
+  const ranked = rankRuntimeUrls(urls);
+  return ranked[0] ?? null;
+}
+
+/**
+ * 从日志行中提取去重后的运行地址列表（已排序：回环优先）。
  *
  * @param logs - 日志缓冲
  * @param limit - 最多返回条数
  * @returns 规范化 URL 数组
  */
-export function extractRuntimeUrls(logs: LogLine[], limit = 6): string[] {
+export function extractRuntimeUrls(logs: LogLine[], limit = 8): string[] {
   const found: string[] = [];
   const seen = new Set<string>();
-  for (const line of logs) {
-    const matches = line.text.match(RUNTIME_URL_PATTERN);
+  // 从新到旧扫，便于先抓住 Vite 换端口后的 Local 行
+  for (let index = logs.length - 1; index >= 0; index -= 1) {
+    const line = logs[index];
+    if (!line) {
+      continue;
+    }
+    const text = line.text;
+    const matches = text.match(RUNTIME_URL_PATTERN);
     if (!matches) {
       continue;
     }
+    // Local: 行优先插入
+    const isLocalLine = /\blocal\s*:/i.test(text);
     for (const match of matches) {
       const normalized = normalizeRuntimeUrl(match);
       if (!normalized || seen.has(normalized)) {
         continue;
       }
       seen.add(normalized);
-      found.push(normalized);
+      if (isLocalLine && isLoopbackUrl(normalized)) {
+        found.unshift(normalized);
+      } else {
+        found.push(normalized);
+      }
+    }
+    if (found.length >= limit * 2) {
+      break;
     }
   }
-  return found.slice(-limit);
+  return rankRuntimeUrls(found).slice(0, limit);
+}
+
+/**
+ * 合并「日志探测」与「登记 openUrl」：探测优先，登记中未出现的作为补充。
+ *
+ * @param detected - 日志探测
+ * @param configured - 清单登记
+ * @returns 有序列表（探测在前）
+ */
+export function mergeDetectedAndConfiguredUrls(
+  detected: string[],
+  configured: Array<string | null | undefined>,
+): string[] {
+  const rankedDetected = rankRuntimeUrls(detected);
+  const seen = new Set(rankedDetected);
+  const extras: string[] = [];
+  for (const item of configured) {
+    if (!item || seen.has(item)) {
+      continue;
+    }
+    const normalized = normalizeRuntimeUrl(item) ?? item;
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    extras.push(normalized);
+  }
+  return [...rankedDetected, ...extras];
 }

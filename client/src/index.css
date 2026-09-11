@@ -117,6 +117,8 @@ code,
 .analysis-doc a {
   color: var(--accent);
   text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
 }
 
 .analysis-doc code {
@@ -162,5 +164,16 @@ code,
   border-left: 3px solid var(--accent);
   padding-left: 0.85rem;
   color: var(--muted);
+}
+
+.log-link {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.log-link:hover {
+  color: #7eefe4;
 }
 

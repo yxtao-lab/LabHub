@@ -4,16 +4,35 @@ import { marked } from 'marked';
 import {
   api,
   ApiError,
+  type Category,
   type LogLine,
+  type ProfileRuntimeView,
   type Project,
   type ProjectPhase,
   type RuntimeStatus,
 } from './api';
+import { splitLogTextWithUrls, type LogTextPart } from './log-links';
 
 type DetailTab = 'logs' | 'analysis';
 type UpgradeReason = 'project' | 'ai' | 'general';
 type BillingCycle = 'monthly' | 'yearly';
 type LegalDocKind = 'terms' | 'privacy';
+
+/** 侧栏分组：一个分类及其项目 */
+type ProjectGroup = {
+  id: string;
+  name: string;
+  projects: Project[];
+  isUncategorized: boolean;
+};
+
+/** 右键菜单目标 */
+type ContextMenuState = {
+  kind: 'project' | 'category';
+  id: string;
+  x: number;
+  y: number;
+};
 
 type PlanFeature = {
   key: string;
@@ -82,6 +101,7 @@ const PHASE_CLASS: Record<ProjectPhase['status'], string> = {
 const ANSI_ESCAPE = /\u001b\[[0-9;]*m/g;
 
 const projects = ref<Project[]>([]);
+const categories = ref<Category[]>([]);
 const selectedId = ref<string | null>(null);
 const logs = ref<LogLine[]>([]);
 const logProfileId = ref<string | null>(null);
@@ -89,6 +109,47 @@ const buildProfileId = ref<string>('');
 const error = ref<string | null>(null);
 const busy = ref(false);
 const showAdd = ref(false);
+const addSubmitting = ref(false);
+const addProgressLabel = ref('');
+const addProgressElapsed = ref(0);
+const addError = ref<string | null>(null);
+const addCloneProgress = ref<{
+  stage: string;
+  percent: number;
+  received: number;
+  total: number;
+  remaining: number;
+  speed: string | null;
+} | null>(null);
+const addInstallLog = ref('');
+let addElapsedTimer: number | undefined;
+const switchJobOpen = ref(false);
+const switchJobTitle = ref('');
+const switchJobLabel = ref('');
+const switchJobElapsed = ref(0);
+const switchJobProgress = ref<{
+  stage: string;
+  percent: number;
+  received: number;
+  total: number;
+  remaining: number;
+  speed: string | null;
+} | null>(null);
+let switchElapsedTimer: number | undefined;
+const showCategoryModal = ref(false);
+const categoryModalMode = ref<'create' | 'rename'>('create');
+const categoryModalTargetId = ref<string | null>(null);
+const categoryNameDraft = ref('');
+const showRenameProject = ref(false);
+const renameProjectId = ref<string | null>(null);
+const renameProjectDraft = ref('');
+const contextMenu = ref<ContextMenuState | null>(null);
+const contextMoveOpen = ref(false);
+const contextBranchOpen = ref(false);
+const contextBranches = ref<string[]>([]);
+const contextBranchCurrent = ref<string | null>(null);
+const contextBranchesLoading = ref(false);
+const contextBranchesError = ref<string | null>(null);
 const showUpgrade = ref(false);
 const legalDoc = ref<LegalDocKind | null>(null);
 const upgradeReason = ref<UpgradeReason>('general');
@@ -139,12 +200,20 @@ const authUser = ref<CloudUser | null>(null);
 const authLoggedIn = ref(false);
 const authReady = ref(false);
 const repoUrl = ref('');
-const startCommand = ref('npm run dev');
-const branch = ref('main');
+const startCommand = ref('');
+const branch = ref('');
+const remoteBranches = ref<string[]>([]);
+const remoteDefaultBranch = ref<string | null>(null);
+const remoteBranchesLoading = ref(false);
+const remoteBranchesError = ref<string | null>(null);
+let remoteBranchesTimer: number | undefined;
+let remoteBranchesRequestId = 0;
 const openUrl = ref('');
 const upstreamUrl = ref('');
 const tagsInput = ref('');
 const tagsDraft = ref('');
+const categoryIdInput = ref('');
+const categoryIdDraft = ref('');
 /** 按项目名称下拉筛选：存项目 id；空字符串表示全部 */
 const nameFilterId = ref('');
 const logPanel = ref<HTMLElement | null>(null);
@@ -160,6 +229,11 @@ const SIDEBAR_COLLAPSED_WIDTH = 52;
 const SIDEBAR_WIDTH_KEY = 'labhub.sidebarWidth';
 const SIDEBAR_COLLAPSED_KEY = 'labhub.sidebarCollapsed';
 const DETAIL_META_COLLAPSED_KEY = 'labhub.detailMetaCollapsed';
+const CATEGORY_COLLAPSED_KEY = 'labhub.categoryCollapsed';
+const UNCATEGORIZED_ID = '__uncategorized__';
+
+/** 收起的分类 id 集合（含 __uncategorized__） */
+const collapsedCategoryIds = ref<Set<string>>(loadCollapsedCategories());
 
 const sidebarWidth = ref(loadSidebarWidth());
 const sidebarCollapsed = ref(loadSidebarCollapsed());
@@ -246,6 +320,70 @@ function loadSidebarCollapsed(): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * 从 localStorage 读取已收起的分类 id。
+ *
+ * @returns 分类 id 集合
+ */
+function loadCollapsedCategories(): Set<string> {
+  try {
+    const raw = localStorage.getItem(CATEGORY_COLLAPSED_KEY);
+    if (!raw) {
+      return new Set();
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return new Set();
+    }
+    return new Set(parsed.filter((item): item is string => typeof item === 'string'));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * 持久化分类收起状态。
+ *
+ * @returns {void}
+ */
+function persistCollapsedCategories(): void {
+  try {
+    localStorage.setItem(
+      CATEGORY_COLLAPSED_KEY,
+      JSON.stringify([...collapsedCategoryIds.value]),
+    );
+  } catch {
+    // 忽略存储失败
+  }
+}
+
+/**
+ * 切换某个分类的收起/展开。
+ *
+ * @param categoryId - 分类 id（未分类为 UNCATEGORIZED_ID）
+ * @returns {void}
+ */
+function toggleCategoryCollapsed(categoryId: string): void {
+  const next = new Set(collapsedCategoryIds.value);
+  if (next.has(categoryId)) {
+    next.delete(categoryId);
+  } else {
+    next.add(categoryId);
+  }
+  collapsedCategoryIds.value = next;
+  persistCollapsedCategories();
+}
+
+/**
+ * 判断分类是否收起。
+ *
+ * @param categoryId - 分类 id
+ * @returns 是否收起
+ */
+function isCategoryCollapsed(categoryId: string): boolean {
+  return collapsedCategoryIds.value.has(categoryId);
 }
 
 /**
@@ -463,7 +601,73 @@ function openAddProject(): void {
     openUpgrade('project');
     return;
   }
+  categoryIdInput.value = selected.value?.categoryId ?? '';
+  remoteBranches.value = [];
+  remoteDefaultBranch.value = null;
+  remoteBranchesError.value = null;
+  branch.value = '';
   showAdd.value = true;
+}
+
+/**
+ * 根据仓库 URL 探测远程分支列表。
+ *
+ * @param url - 仓库地址
+ * @returns {Promise<void>}
+ */
+async function fetchRemoteBranches(url: string): Promise<void> {
+  const trimmed = url.trim();
+  const requestId = ++remoteBranchesRequestId;
+  if (!trimmed || !/^https?:\/\/|^git@/i.test(trimmed)) {
+    remoteBranches.value = [];
+    remoteDefaultBranch.value = null;
+    remoteBranchesError.value = null;
+    remoteBranchesLoading.value = false;
+    return;
+  }
+  remoteBranchesLoading.value = true;
+  remoteBranchesError.value = null;
+  try {
+    const data = await api<{ branches: string[]; defaultBranch: string | null }>(
+      `/api/projects/remote-branches?repoUrl=${encodeURIComponent(trimmed)}`,
+    );
+    if (requestId !== remoteBranchesRequestId) {
+      return;
+    }
+    remoteBranches.value = data.branches;
+    remoteDefaultBranch.value = data.defaultBranch;
+    if (!branch.value && data.defaultBranch) {
+      branch.value = data.defaultBranch;
+    } else if (branch.value && data.branches.length > 0 && !data.branches.includes(branch.value)) {
+      branch.value = data.defaultBranch || data.branches[0] || '';
+    }
+  } catch (err) {
+    if (requestId !== remoteBranchesRequestId) {
+      return;
+    }
+    remoteBranches.value = [];
+    remoteDefaultBranch.value = null;
+    remoteBranchesError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    if (requestId === remoteBranchesRequestId) {
+      remoteBranchesLoading.value = false;
+    }
+  }
+}
+
+/**
+ * 防抖触发远程分支探测。
+ *
+ * @param url - 仓库地址
+ * @returns {void}
+ */
+function scheduleFetchRemoteBranches(url: string): void {
+  if (remoteBranchesTimer !== undefined) {
+    window.clearTimeout(remoteBranchesTimer);
+  }
+  remoteBranchesTimer = window.setTimeout(() => {
+    void fetchRemoteBranches(url);
+  }, 450);
 }
 
 /**
@@ -769,6 +973,48 @@ const filteredProjects = computed(() => {
 });
 
 /**
+ * 按分类分组的侧栏列表（含未分类；空分类也展示以便管理）。
+ *
+ * @returns 分组数组
+ */
+const projectGroups = computed((): ProjectGroup[] => {
+  const list = filteredProjects.value;
+  const byCategory = new Map<string, Project[]>();
+  for (const project of list) {
+    const key = project.categoryId || UNCATEGORIZED_ID;
+    const bucket = byCategory.get(key);
+    if (bucket) {
+      bucket.push(project);
+    } else {
+      byCategory.set(key, [project]);
+    }
+  }
+
+  const groups: ProjectGroup[] = categories.value.map((category) => ({
+    id: category.id,
+    name: category.name,
+    projects: byCategory.get(category.id) ?? [],
+    isUncategorized: false,
+  }));
+
+  const uncategorized = byCategory.get(UNCATEGORIZED_ID) ?? [];
+  if (uncategorized.length > 0 || categories.value.length === 0) {
+    groups.push({
+      id: UNCATEGORIZED_ID,
+      name: '未分类',
+      projects: uncategorized,
+      isUncategorized: true,
+    });
+  }
+
+  // 名称筛选时隐藏空分组，避免干扰
+  if (nameFilterId.value) {
+    return groups.filter((group) => group.projects.length > 0);
+  }
+  return groups;
+});
+
+/**
  * 卡片上最多展示的标签数量，超出以省略号表示。
  */
 const CARD_TAG_LIMIT = 3;
@@ -808,11 +1054,15 @@ let logsTimer: number | undefined;
    */
 async function refresh(silent = false): Promise<void> {
   try {
-    const data = await api<{ projects: Project[] }>('/api/projects');
-    projects.value = data.projects;
+    const [projectData, categoryData] = await Promise.all([
+      api<{ projects: Project[] }>('/api/projects'),
+      api<{ categories: Category[] }>('/api/categories'),
+    ]);
+    projects.value = projectData.projects;
+    categories.value = categoryData.categories;
     error.value = null;
-    if (!selectedId.value && data.projects[0]) {
-      selectedId.value = data.projects[0].id;
+    if (!selectedId.value && projectData.projects[0]) {
+      selectedId.value = projectData.projects[0].id;
     }
   } catch (err) {
     if (!silent) {
@@ -950,6 +1200,12 @@ async function toggleProject(project: Project, event: MouseEvent): Promise<void>
   event.stopPropagation();
   const running =
     project.runtime.status === 'running' || project.runtime.status === 'starting';
+  if (!running && project.needsInstall) {
+    selectedId.value = project.id;
+    error.value = '请先安装依赖，完成后再启动项目';
+    showToast('请先安装依赖');
+    return;
+  }
   await runAction(async () => {
     if (running) {
       await api(`/api/projects/${project.id}/stop`, { method: 'POST', body: '{}' });
@@ -971,6 +1227,11 @@ async function toggleProject(project: Project, event: MouseEvent): Promise<void>
  */
 async function toggleProfile(profileId: string, running: boolean): Promise<void> {
   if (!selected.value) {
+    return;
+  }
+  if (!running && selected.value.needsInstall) {
+    error.value = '请先安装依赖，完成后再启动项目';
+    showToast('请先安装依赖');
     return;
   }
   const id = selected.value.id;
@@ -1012,6 +1273,11 @@ async function buildSelected(profileId?: string | null): Promise<void> {
   if (!selected.value) {
     return;
   }
+  if (selected.value.needsInstall) {
+    error.value = '请先安装依赖，完成后再构建';
+    showToast('请先安装依赖');
+    return;
+  }
   const id = selected.value.id;
   const targetId =
     profileId ||
@@ -1046,6 +1312,145 @@ function onBuildProfileChange(event: Event): void {
 }
 
 /**
+ * 开始添加仓库的进度提示（计时）。
+ *
+ * @returns {void}
+ */
+function startAddProgress(): void {
+  stopAddProgress();
+  addSubmitting.value = true;
+  addError.value = null;
+  addCloneProgress.value = null;
+  addInstallLog.value = '';
+  addProgressElapsed.value = 0;
+  addProgressLabel.value = '正在准备克隆…';
+  addElapsedTimer = window.setInterval(() => {
+    addProgressElapsed.value += 1;
+  }, 1000);
+}
+
+/**
+ * 停止添加仓库进度提示。
+ *
+ * @returns {void}
+ */
+function stopAddProgress(): void {
+  addSubmitting.value = false;
+  if (addElapsedTimer !== undefined) {
+    window.clearInterval(addElapsedTimer);
+    addElapsedTimer = undefined;
+  }
+}
+
+/**
+ * 将 git 阶段名翻译为中文。
+ *
+ * @param stage - git 进度阶段
+ * @returns 中文文案
+ */
+function gitStageLabel(stage: string): string {
+  const map: Record<string, string> = {
+    'Counting objects': '计数对象',
+    'Compressing objects': '压缩对象',
+    'Receiving objects': '接收对象',
+    'Resolving deltas': '解析增量',
+  };
+  return map[stage] || stage;
+}
+
+/**
+ * 以 NDJSON 流方式登记项目，并更新进度 UI。
+ *
+ * @param body - 请求体
+ * @returns 新建项目
+ * @throws {ApiError} 失败时抛出
+ */
+async function addProjectWithProgress(body: Record<string, unknown>): Promise<Project> {
+  const response = await fetch('/api/projects?stream=1', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/x-ndjson',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok || !response.body) {
+    const raw = await response.text();
+    let message = raw.slice(0, 200) || `请求失败 HTTP ${response.status}`;
+    let code: string | undefined;
+    try {
+      const data = JSON.parse(raw) as { error?: string; code?: string };
+      if (typeof data.error === 'string') {
+        message = data.error;
+      }
+      code = data.code;
+    } catch {
+      // 非 JSON
+    }
+    throw new ApiError(message, code);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let project: Project | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(trimmed) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      if (event.type === 'status') {
+        addProgressLabel.value = String(event.message || '');
+        if (event.phase === 'install') {
+          addCloneProgress.value = null;
+        }
+      } else if (event.type === 'clone-progress') {
+        addCloneProgress.value = {
+          stage: String(event.stage || ''),
+          percent: Number(event.percent) || 0,
+          received: Number(event.received) || 0,
+          total: Number(event.total) || 0,
+          remaining: Number(event.remaining) || 0,
+          speed: typeof event.speed === 'string' ? event.speed : null,
+        };
+        const progress = addCloneProgress.value;
+        addProgressLabel.value = `${gitStageLabel(progress.stage)} ${progress.percent}%`;
+      } else if (event.type === 'install-log') {
+        addInstallLog.value = String(event.line || '');
+      } else if (event.type === 'done') {
+        project = event.project as Project;
+      } else if (event.type === 'error') {
+        throw new ApiError(
+          String(event.error || '登记失败'),
+          typeof event.code === 'string' ? event.code : undefined,
+        );
+      }
+    }
+  }
+
+  if (!project) {
+    throw new ApiError('登记未返回项目结果');
+  }
+  return project;
+}
+
+/**
  * 提交添加仓库表单。
  *
  * @param event - 表单提交事件
@@ -1053,26 +1458,45 @@ function onBuildProfileChange(event: Event): void {
  */
 async function submitAdd(event: Event): Promise<void> {
   event.preventDefault();
-  await runAction(async () => {
-    const data = await api<{ project: Project }>('/api/projects', {
-      method: 'POST',
-      body: JSON.stringify({
-        repoUrl: repoUrl.value,
-        branch: branch.value,
-        startCommand: startCommand.value,
-        upstreamUrl: upstreamUrl.value || null,
-        openUrl: openUrl.value || null,
-        tags: tagsInput.value,
-      }),
+  if (addSubmitting.value || busy.value) {
+    return;
+  }
+  startAddProgress();
+  busy.value = true;
+  error.value = null;
+  addError.value = null;
+  try {
+    const data = await addProjectWithProgress({
+      repoUrl: repoUrl.value,
+      branch: branch.value,
+      startCommand: startCommand.value,
+      upstreamUrl: upstreamUrl.value || null,
+      openUrl: openUrl.value || null,
+      tags: tagsInput.value,
+      categoryId: categoryIdInput.value || null,
+      skipInstall: true,
     });
     showAdd.value = false;
     repoUrl.value = '';
     openUrl.value = '';
     tagsInput.value = '';
+    categoryIdInput.value = '';
     upstreamUrl.value = '';
-    selectedId.value = data.project.id;
+    startCommand.value = '';
+    branch.value = '';
+    selectedId.value = data.id;
     await refreshAuth();
-  });
+    await refresh();
+    showToast('登记成功：请先安装依赖，再启动或构建');
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    addError.value = message;
+    error.value = message;
+    maybeOpenUpgradeFromError(err);
+  } finally {
+    stopAddProgress();
+    busy.value = false;
+  }
 }
 
 /**
@@ -1114,14 +1538,405 @@ async function removeSelected(): Promise<void> {
   if (!selected.value) {
     return;
   }
-  const id = selected.value.id;
-  if (!window.confirm(`从清单移除 ${id}？（默认不删磁盘文件）`)) {
+  await removeProjectById(selected.value.id);
+}
+
+/**
+ * 按 id 从清单移除项目（默认不删磁盘）。
+ *
+ * @param projectId - 项目 id
+ * @returns {Promise<void>}
+ */
+async function removeProjectById(projectId: string): Promise<void> {
+  if (!window.confirm(`从清单移除 ${projectId}？（默认不删磁盘文件）`)) {
     return;
   }
   await runAction(async () => {
-    await api(`/api/projects/${id}`, { method: 'DELETE' });
-    selectedId.value = null;
+    await api(`/api/projects/${projectId}`, { method: 'DELETE' });
+    if (selectedId.value === projectId) {
+      selectedId.value = null;
+    }
   });
+}
+
+/**
+ * 关闭右键菜单。
+ *
+ * @returns {void}
+ */
+function closeContextMenu(): void {
+  contextMenu.value = null;
+  contextMoveOpen.value = false;
+  contextBranchOpen.value = false;
+  contextBranches.value = [];
+  contextBranchCurrent.value = null;
+  contextBranchesLoading.value = false;
+  contextBranchesError.value = null;
+}
+
+/**
+ * 将菜单坐标限制在视口内。
+ *
+ * @param x - 鼠标 x
+ * @param y - 鼠标 y
+ * @param width - 菜单预估宽度
+ * @param height - 菜单预估高度
+ * @returns 修正后的坐标
+ */
+function clampMenuPosition(
+  x: number,
+  y: number,
+  width = 180,
+  height = 260,
+): { x: number; y: number } {
+  const pad = 8;
+  const maxX = Math.max(pad, window.innerWidth - width - pad);
+  const maxY = Math.max(pad, window.innerHeight - height - pad);
+  return {
+    x: Math.min(Math.max(pad, x), maxX),
+    y: Math.min(Math.max(pad, y), maxY),
+  };
+}
+
+/**
+ * 打开项目右键菜单。
+ *
+ * @param project - 项目
+ * @param event - 鼠标事件
+ * @returns {void}
+ */
+function openProjectContextMenu(project: Project, event: MouseEvent): void {
+  event.preventDefault();
+  event.stopPropagation();
+  selectedId.value = project.id;
+  const pos = clampMenuPosition(event.clientX, event.clientY, 200, 360);
+  contextMenu.value = { kind: 'project', id: project.id, x: pos.x, y: pos.y };
+  contextMoveOpen.value = false;
+  contextBranchOpen.value = false;
+  contextBranches.value = [];
+  contextBranchCurrent.value = project.git?.branch ?? project.branch ?? null;
+  contextBranchesError.value = null;
+  if (project.exists && project.isGitRepo) {
+    void loadContextBranches(project.id);
+  }
+}
+
+/**
+ * 加载右键菜单中的分支列表。
+ *
+ * @param projectId - 项目 id
+ * @returns {Promise<void>}
+ */
+async function loadContextBranches(projectId: string): Promise<void> {
+  contextBranchesLoading.value = true;
+  contextBranchesError.value = null;
+  try {
+    const data = await api<{ current: string | null; branches: string[] }>(
+      `/api/projects/${projectId}/branches`,
+    );
+    if (contextMenu.value?.kind === 'project' && contextMenu.value.id === projectId) {
+      contextBranches.value = data.branches;
+      contextBranchCurrent.value = data.current;
+    }
+  } catch (err) {
+    if (contextMenu.value?.kind === 'project' && contextMenu.value.id === projectId) {
+      contextBranchesError.value = err instanceof Error ? err.message : String(err);
+    }
+  } finally {
+    if (contextMenu.value?.kind === 'project' && contextMenu.value.id === projectId) {
+      contextBranchesLoading.value = false;
+    }
+  }
+}
+
+/**
+ * 从右键菜单切换分支。
+ *
+ * @param branchName - 目标分支
+ * @returns {Promise<void>}
+ */
+async function checkoutContextBranch(branchName: string): Promise<void> {
+  const project = contextProject.value;
+  if (!project) {
+    return;
+  }
+  if (branchName === (contextBranchCurrent.value || project.git?.branch)) {
+    closeContextMenu();
+    return;
+  }
+  closeContextMenu();
+  startSwitchProgress(project.name || project.id, branchName);
+  busy.value = true;
+  error.value = null;
+  try {
+    await checkoutBranchWithProgress(project.id, branchName);
+    await refresh();
+    showToast(`已切换到分支 ${branchName}`);
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    stopSwitchProgress();
+    busy.value = false;
+  }
+}
+
+/**
+ * 开始切换分支进度提示。
+ *
+ * @param projectName - 项目名
+ * @param branchName - 目标分支
+ * @returns {void}
+ */
+function startSwitchProgress(projectName: string, branchName: string): void {
+  stopSwitchProgress();
+  switchJobOpen.value = true;
+  switchJobTitle.value = `${projectName} → ${branchName}`;
+  switchJobLabel.value = `正在切换到分支 ${branchName}…`;
+  switchJobElapsed.value = 0;
+  switchJobProgress.value = null;
+  switchElapsedTimer = window.setInterval(() => {
+    switchJobElapsed.value += 1;
+  }, 1000);
+}
+
+/**
+ * 停止切换分支进度提示。
+ *
+ * @returns {void}
+ */
+function stopSwitchProgress(): void {
+  switchJobOpen.value = false;
+  if (switchElapsedTimer !== undefined) {
+    window.clearInterval(switchElapsedTimer);
+    switchElapsedTimer = undefined;
+  }
+}
+
+/**
+ * 以 NDJSON 流方式切换分支，并更新进度 UI。
+ *
+ * @param projectId - 项目 id
+ * @param branchName - 目标分支
+ * @returns {Promise<void>}
+ * @throws {ApiError} 失败时抛出
+ */
+async function checkoutBranchWithProgress(projectId: string, branchName: string): Promise<void> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/checkout?stream=1`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/x-ndjson',
+    },
+    body: JSON.stringify({ branch: branchName }),
+  });
+
+  if (!response.ok || !response.body) {
+    const raw = await response.text();
+    let message = raw.slice(0, 200) || `切换失败 HTTP ${response.status}`;
+    try {
+      const data = JSON.parse(raw) as { error?: string };
+      if (typeof data.error === 'string') {
+        message = data.error;
+      }
+    } catch {
+      // 非 JSON
+    }
+    throw new ApiError(message);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let gotDone = false;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(trimmed) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      if (event.type === 'status') {
+        switchJobLabel.value = String(event.message || '');
+        if (event.phase === 'done') {
+          switchJobProgress.value = null;
+        }
+      } else if (event.type === 'clone-progress') {
+        switchJobProgress.value = {
+          stage: String(event.stage || ''),
+          percent: Number(event.percent) || 0,
+          received: Number(event.received) || 0,
+          total: Number(event.total) || 0,
+          remaining: Number(event.remaining) || 0,
+          speed: typeof event.speed === 'string' ? event.speed : null,
+        };
+        const progress = switchJobProgress.value;
+        switchJobLabel.value = `${gitStageLabel(progress.stage)} ${progress.percent}%`;
+      } else if (event.type === 'done') {
+        gotDone = true;
+      } else if (event.type === 'error') {
+        throw new ApiError(String(event.error || '切换分支失败'));
+      }
+    }
+  }
+
+  if (!gotDone) {
+    throw new ApiError('切换分支未完成');
+  }
+}
+
+/**
+ * 打开分类右键菜单。
+ *
+ * @param group - 分组
+ * @param event - 鼠标事件
+ * @returns {void}
+ */
+function openCategoryContextMenu(group: ProjectGroup, event: MouseEvent): void {
+  event.preventDefault();
+  event.stopPropagation();
+  const pos = clampMenuPosition(event.clientX, event.clientY, 180, 200);
+  contextMenu.value = { kind: 'category', id: group.id, x: pos.x, y: pos.y };
+  contextMoveOpen.value = false;
+}
+
+/**
+ * 当前右键菜单对应的项目。
+ *
+ * @returns 项目或 null
+ */
+const contextProject = computed(() => {
+  if (contextMenu.value?.kind !== 'project') {
+    return null;
+  }
+  return projects.value.find((item) => item.id === contextMenu.value?.id) ?? null;
+});
+
+/**
+ * 当前右键菜单对应的分类分组。
+ *
+ * @returns 分组或 null
+ */
+const contextCategoryGroup = computed(() => {
+  if (contextMenu.value?.kind !== 'category') {
+    return null;
+  }
+  return projectGroups.value.find((item) => item.id === contextMenu.value?.id) ?? null;
+});
+
+/**
+ * 移动项目到指定分类（空字符串表示未分类）。
+ *
+ * @param projectId - 项目 id
+ * @param categoryId - 分类 id 或空
+ * @returns {Promise<void>}
+ */
+async function moveProjectToCategory(projectId: string, categoryId: string): Promise<void> {
+  closeContextMenu();
+  await runAction(async () => {
+    await api(`/api/projects/${projectId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ categoryId: categoryId || null }),
+    });
+  });
+}
+
+/**
+ * 打开重命名项目弹窗。
+ *
+ * @param project - 项目
+ * @returns {void}
+ */
+function openRenameProject(project: Project): void {
+  closeContextMenu();
+  renameProjectId.value = project.id;
+  renameProjectDraft.value = project.name;
+  showRenameProject.value = true;
+}
+
+/**
+ * 提交项目重命名。
+ *
+ * @param event - 表单事件
+ * @returns {Promise<void>}
+ */
+async function submitRenameProject(event: Event): Promise<void> {
+  event.preventDefault();
+  const id = renameProjectId.value;
+  const name = renameProjectDraft.value.trim();
+  if (!id || !name) {
+    return;
+  }
+  await runAction(async () => {
+    await api(`/api/projects/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    });
+    showRenameProject.value = false;
+    renameProjectId.value = null;
+    renameProjectDraft.value = '';
+  });
+}
+
+/**
+ * 在指定分类下打开添加仓库。
+ *
+ * @param categoryId - 分类 id；未分类传空
+ * @returns {void}
+ */
+function openAddProjectInCategory(categoryId: string): void {
+  closeContextMenu();
+  if (projectAtLimit.value) {
+    openUpgrade('project');
+    return;
+  }
+  categoryIdInput.value = categoryId === UNCATEGORIZED_ID ? '' : categoryId;
+  remoteBranches.value = [];
+  remoteDefaultBranch.value = null;
+  remoteBranchesError.value = null;
+  branch.value = '';
+  showAdd.value = true;
+}
+
+/**
+ * 全局点击 / Esc 关闭右键菜单。
+ *
+ * @param event - 事件
+ * @returns {void}
+ */
+function onGlobalPointerDown(event: Event): void {
+  if (!contextMenu.value) {
+    return;
+  }
+  const target = event.target as HTMLElement | null;
+  if (target?.closest?.('[data-context-menu]')) {
+    return;
+  }
+  closeContextMenu();
+}
+
+/**
+ * Esc 关闭右键菜单。
+ *
+ * @param event - 键盘事件
+ * @returns {void}
+ */
+function onGlobalKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    closeContextMenu();
+  }
 }
 
 /**
@@ -1179,6 +1994,123 @@ async function saveSelectedTags(): Promise<void> {
 }
 
 /**
+ * 保存当前选中项目的归属分类。
+ *
+ * @returns {Promise<void>}
+ */
+async function saveSelectedCategory(): Promise<void> {
+  if (!selected.value) {
+    return;
+  }
+  const id = selected.value.id;
+  await runAction(async () => {
+    await api(`/api/projects/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ categoryId: categoryIdDraft.value || null }),
+    });
+  });
+}
+
+/**
+ * 打开新建分类弹窗。
+ *
+ * @returns {void}
+ */
+function openCreateCategory(): void {
+  closeContextMenu();
+  categoryModalMode.value = 'create';
+  categoryModalTargetId.value = null;
+  categoryNameDraft.value = '';
+  showCategoryModal.value = true;
+}
+
+/**
+ * 打开重命名分类弹窗。
+ *
+ * @param categoryId - 分类 id
+ * @param event - 可选点击事件
+ * @returns {void}
+ */
+function openRenameCategory(categoryId: string, event?: Event): void {
+  event?.stopPropagation();
+  closeContextMenu();
+  const category = categories.value.find((item) => item.id === categoryId);
+  if (!category) {
+    return;
+  }
+  categoryModalMode.value = 'rename';
+  categoryModalTargetId.value = categoryId;
+  categoryNameDraft.value = category.name;
+  showCategoryModal.value = true;
+}
+
+/**
+ * 提交分类新建 / 重命名。
+ *
+ * @param event - 表单事件
+ * @returns {Promise<void>}
+ */
+async function submitCategoryModal(event: Event): Promise<void> {
+  event.preventDefault();
+  const name = categoryNameDraft.value.trim();
+  if (!name) {
+    return;
+  }
+  const mode = categoryModalMode.value;
+  await runAction(async () => {
+    if (mode === 'create') {
+      const data = await api<{ category: Category }>('/api/categories', {
+        method: 'POST',
+        body: JSON.stringify({ name }),
+      });
+      // 添加仓库弹窗打开时，新建后自动选中该分类
+      if (showAdd.value && data.category?.id) {
+        categoryIdInput.value = data.category.id;
+      }
+      if (selectedId.value && !showAdd.value) {
+        categoryIdDraft.value = data.category.id;
+      }
+    } else if (categoryModalTargetId.value) {
+      await api(`/api/categories/${categoryModalTargetId.value}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ name }),
+      });
+    }
+    showCategoryModal.value = false;
+    categoryNameDraft.value = '';
+    categoryModalTargetId.value = null;
+  });
+}
+
+/**
+ * 删除分类（其下项目变为未分类）。
+ *
+ * @param categoryId - 分类 id
+ * @param event - 可选点击事件
+ * @returns {Promise<void>}
+ */
+async function deleteCategoryById(categoryId: string, event?: Event): Promise<void> {
+  event?.stopPropagation();
+  closeContextMenu();
+  const category = categories.value.find((item) => item.id === categoryId);
+  if (!category) {
+    return;
+  }
+  if (!window.confirm(`删除分类「${category.name}」？其下项目将变为未分类。`)) {
+    return;
+  }
+  await runAction(async () => {
+    await api(`/api/categories/${categoryId}`, { method: 'DELETE' });
+    if (categoryIdDraft.value === categoryId) {
+      categoryIdDraft.value = '';
+    }
+    if (categoryIdInput.value === categoryId) {
+      categoryIdInput.value = '';
+    }
+  });
+}
+
+/**
  * 选中项目并打开分析总结页签。
  *
  * @param projectId - 项目 id
@@ -1187,9 +2119,55 @@ async function saveSelectedTags(): Promise<void> {
  */
 function openAnalysis(projectId: string, event?: Event): void {
   event?.stopPropagation();
+  closeContextMenu();
   selectedId.value = projectId;
   detailTab.value = 'analysis';
   void refreshAnalysis(projectId);
+}
+
+/**
+ * 从右键菜单启停项目。
+ *
+ * @returns {Promise<void>}
+ */
+async function toggleContextProject(): Promise<void> {
+  const project = contextProject.value;
+  if (!project) {
+    return;
+  }
+  closeContextMenu();
+  const running =
+    project.runtime.status === 'running' || project.runtime.status === 'starting';
+  if (!running && project.needsInstall) {
+    selectedId.value = project.id;
+    error.value = '请先安装依赖，完成后再启动项目';
+    showToast('请先安装依赖');
+    return;
+  }
+  await runAction(async () => {
+    if (running) {
+      await api(`/api/projects/${project.id}/stop`, { method: 'POST', body: '{}' });
+      return;
+    }
+    await api(`/api/projects/${project.id}/start`, {
+      method: 'POST',
+      body: JSON.stringify({ profileId: project.defaultProfileId }),
+    });
+  });
+}
+
+/**
+ * 从右键菜单移除项目。
+ *
+ * @returns {Promise<void>}
+ */
+async function removeContextProject(): Promise<void> {
+  const project = contextProject.value;
+  if (!project) {
+    return;
+  }
+  closeContextMenu();
+  await removeProjectById(project.id);
 }
 
 /**
@@ -1218,24 +2196,54 @@ function stripAnsi(text: string): string {
   return text.replace(ANSI_ESCAPE, '');
 }
 
+const logLinkTitle = /Mac|iPhone|iPad/.test(navigator.platform)
+  ? '⌘+点击打开'
+  : 'Ctrl+点击打开';
+
 /**
- * 汇总项目的访问地址：各模式 openUrl + 日志探测结果（去重）。
+ * 将日志行拆成文本与可点击 URL。
+ *
+ * @param text - 原始日志（可含 ANSI）
+ * @returns 展示片段
+ */
+function logLineParts(text: string): LogTextPart[] {
+  return splitLogTextWithUrls(stripAnsi(text));
+}
+
+/**
+ * 控制台链接：Ctrl/⌘+点击或普通点击均在新标签打开，避免离开控制台。
+ *
+ * @param event - 点击事件
+ */
+function onLogLinkClick(event: MouseEvent): void {
+  const fromCurrent =
+    event.currentTarget instanceof HTMLAnchorElement ? event.currentTarget : null;
+  const fromTarget =
+    event.target instanceof Element ? event.target.closest('a') : null;
+  const anchor = fromCurrent ?? fromTarget;
+  if (!anchor?.href) {
+    return;
+  }
+  event.preventDefault();
+  window.open(anchor.href, '_blank', 'noopener,noreferrer');
+}
+
+/**
+ * 汇总项目访问地址：日志探测优先，登记 openUrl 作补充。
  *
  * @param project - 项目视图
  * @returns 可打开的 URL 列表
  */
 function projectUrls(project: Project): string[] {
+  const detected = (project.profileRuntimes ?? []).flatMap((item) => item.runtimeUrls ?? []);
+  const fromProject = project.runtimeUrls ?? [];
+  const configured = [
+    project.openUrl,
+    ...(project.profileRuntimes ?? []).map((item) => item.profile.openUrl ?? null),
+  ];
   const urls: string[] = [];
   const seen = new Set<string>();
-  const candidates = [
-    project.openUrl,
-    ...(project.runtimeUrls ?? []),
-    ...(project.profileRuntimes ?? []).flatMap((item) => [
-      item.profile.openUrl ?? null,
-      ...item.runtimeUrls,
-    ]),
-  ];
-  for (const item of candidates) {
+  for (const item of [...detected, ...fromProject, ...configured]) {
     if (!item || seen.has(item)) {
       continue;
     }
@@ -1243,6 +2251,41 @@ function projectUrls(project: Project): string[] {
     urls.push(item);
   }
   return urls;
+}
+
+/**
+ * 某启动模式「日志探测到」的地址。
+ *
+ * @param item - 模式运行视图
+ * @returns URL 列表
+ */
+function profileDetectedUrls(item: ProfileRuntimeView): string[] {
+  return item.runtimeUrls ?? [];
+}
+
+/**
+ * 某启动模式仅登记、尚未被探测覆盖的地址。
+ *
+ * @param item - 模式运行视图
+ * @returns URL 列表
+ */
+function profileConfiguredOnlyUrls(item: ProfileRuntimeView): string[] {
+  const openUrl = item.profile.openUrl;
+  if (!openUrl) {
+    return [];
+  }
+  const detected = new Set(profileDetectedUrls(item));
+  return detected.has(openUrl) ? [] : [openUrl];
+}
+
+/**
+ * 项目级：是否已有日志探测地址。
+ *
+ * @param project - 项目
+ * @returns 是否有探测结果
+ */
+function hasDetectedUrls(project: Project): boolean {
+  return (project.profileRuntimes ?? []).some((item) => (item.runtimeUrls?.length ?? 0) > 0);
 }
 
 /**
@@ -1283,6 +2326,8 @@ function phaseLabel(status: ProjectPhase['status']): string {
 }
 
 onMounted(() => {
+  window.addEventListener('pointerdown', onGlobalPointerDown, true);
+  window.addEventListener('keydown', onGlobalKeydown);
   void (async () => {
     await refreshAuth();
     if (authLoggedIn.value) {
@@ -1293,6 +2338,8 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  window.removeEventListener('pointerdown', onGlobalPointerDown, true);
+  window.removeEventListener('keydown', onGlobalKeydown);
   if (projectsTimer !== undefined) {
     window.clearInterval(projectsTimer);
   }
@@ -1304,6 +2351,34 @@ onUnmounted(() => {
   }
   if (toastTimer !== undefined) {
     window.clearTimeout(toastTimer);
+  }
+  if (remoteBranchesTimer !== undefined) {
+    window.clearTimeout(remoteBranchesTimer);
+  }
+  stopAddProgress();
+  stopSwitchProgress();
+});
+
+watch(repoUrl, (url) => {
+  if (!showAdd.value) {
+    return;
+  }
+  scheduleFetchRemoteBranches(url);
+});
+
+watch(showAdd, (open) => {
+  if (open && repoUrl.value.trim()) {
+    scheduleFetchRemoteBranches(repoUrl.value);
+  }
+  if (!open) {
+    remoteBranches.value = [];
+    remoteDefaultBranch.value = null;
+    remoteBranchesError.value = null;
+    remoteBranchesLoading.value = false;
+    addError.value = null;
+    if (!addSubmitting.value) {
+      stopAddProgress();
+    }
   }
 });
 
@@ -1320,11 +2395,13 @@ watch(
     if (!id) {
       logs.value = [];
       tagsDraft.value = '';
+      categoryIdDraft.value = '';
       detailTab.value = 'logs';
       return;
     }
     const project = projects.value.find((item) => item.id === id);
     tagsDraft.value = (project?.tags ?? []).join(', ');
+    categoryIdDraft.value = project?.categoryId ?? '';
     buildProfileId.value =
       project?.defaultBuildProfileId || project?.buildProfiles?.[0]?.id || '';
     detailTab.value = project?.hasAnalysis ? 'analysis' : 'logs';
@@ -1333,6 +2410,16 @@ watch(
     logsTimer = window.setInterval(() => void refreshLogs(id), 2000);
   },
   { immediate: true },
+);
+
+/** 列表刷新后同步详情区分类草稿 */
+watch(
+  () => selected.value?.categoryId,
+  (categoryId) => {
+    if (selectedId.value) {
+      categoryIdDraft.value = categoryId ?? '';
+    }
+  },
 );
 
 watch(logProfileId, () => {
@@ -1705,23 +2792,34 @@ watch(logProfileId, () => {
           class="shrink-0 border-b border-[var(--line)] px-3 py-2"
           :class="sidebarCollapsed ? 'lg:hidden' : ''"
         >
-          <label class="block text-[11px] text-[var(--muted)]">
-            按名称筛选
-            <select
-              :value="nameFilterId"
-              class="mt-1 w-full rounded border border-[var(--line)] bg-[#0b1016] px-2 py-1.5 text-xs text-[var(--text)] outline-none focus:border-[var(--accent)]"
-              @change="onNameFilterChange"
-            >
-              <option value="">全部项目</option>
-              <option
-                v-for="item in projectNameOptions"
-                :key="item.id"
-                :value="item.id"
+          <div class="flex items-end gap-2">
+            <label class="min-w-0 flex-1 block text-[11px] text-[var(--muted)]">
+              按名称筛选
+              <select
+                :value="nameFilterId"
+                class="mt-1 w-full rounded border border-[var(--line)] bg-[#0b1016] px-2 py-1.5 text-xs text-[var(--text)] outline-none focus:border-[var(--accent)]"
+                @change="onNameFilterChange"
               >
-                {{ item.name }}
-              </option>
-            </select>
-          </label>
+                <option value="">全部项目</option>
+                <option
+                  v-for="item in projectNameOptions"
+                  :key="item.id"
+                  :value="item.id"
+                >
+                  {{ item.name }}
+                </option>
+              </select>
+            </label>
+            <button
+              type="button"
+              :disabled="busy"
+              class="shrink-0 rounded border border-[var(--line)] px-2 py-1.5 text-[11px] text-[var(--muted)] hover:border-[var(--accent)]/40 hover:text-[var(--text)] disabled:opacity-40"
+              title="新建分类"
+              @click="openCreateCategory"
+            >
+              新建分类
+            </button>
+          </div>
         </div>
 
         <div
@@ -1729,7 +2827,7 @@ watch(logProfileId, () => {
           :class="sidebarCollapsed ? 'lg:hidden' : ''"
         >
           <div
-            v-if="filteredProjects.length === 0"
+            v-if="filteredProjects.length === 0 && (nameFilterId || categories.length === 0)"
             class="rounded-lg border border-dashed border-[var(--line)] px-4 py-10 text-center"
           >
             <p class="text-sm font-medium">
@@ -1749,93 +2847,133 @@ watch(logProfileId, () => {
           </div>
 
           <div
-            v-for="project in filteredProjects"
-            :key="project.id"
-            role="button"
-            tabindex="0"
-            class="mb-2 cursor-pointer rounded-lg border bg-[var(--panel)]/55 px-3 py-3 transition"
-            :class="
-              selectedId === project.id
-                ? 'border-[var(--accent)]/50 bg-[var(--panel)]'
-                : 'border-[var(--line)] hover:border-[var(--accent)]/30 hover:bg-[var(--panel)]'
-            "
-            @click="selectedId = project.id"
-            @keydown.enter="selectedId = project.id"
+            v-for="group in projectGroups"
+            :key="group.id"
+            class="mb-2"
           >
-            <div class="flex items-start justify-between gap-2">
-              <div class="min-w-0 flex-1">
-                <div class="flex flex-wrap items-center gap-2">
-                  <span class="truncate font-medium">{{ project.name }}</span>
-                  <span
-                    class="rounded px-1.5 py-0.5 text-[10px] font-medium"
-                    :class="statusClass(project.runtime.status)"
-                  >
-                    {{ statusLabel(project.runtime.status) }}
-                  </span>
-                  <span
-                    v-if="project.currentPhase"
-                    class="rounded border border-[var(--accent)]/35 px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]"
-                  >
-                    {{ project.currentPhase }}
-                  </span>
-                </div>
-                <div v-if="project.tags?.length" class="mt-1.5 flex flex-wrap items-center gap-1">
-                  <span
-                    v-for="tag in cardTags(project.tags).visible"
-                    :key="tag"
-                    class="rounded bg-[#0b1016] px-1.5 py-0.5 text-[10px] text-[var(--muted)]"
-                  >
-                    {{ tag }}
-                  </span>
-                  <span
-                    v-if="cardTags(project.tags).hasMore"
-                    class="rounded bg-[#0b1016] px-1.5 py-0.5 text-[10px] text-[var(--muted)]"
-                    :title="project.tags.join('、')"
-                  >
-                    …
-                  </span>
-                </div>
-                <p class="mt-1.5 text-[11px] text-[var(--muted)]">
-                  <template v-if="(project.startProfiles?.length ?? 0) > 1">
-                    {{ project.startProfiles.length }} 个启动模式 · 默认
-                    {{ project.defaultProfileId }}
-                  </template>
-                  <template v-else>单模式启动</template>
-                </p>
-              </div>
+            <div
+              class="mb-1 flex items-center gap-1"
+              @contextmenu="openCategoryContextMenu(group, $event)"
+            >
               <button
-                v-if="
-                  project.runtime.status === 'running' || project.runtime.status === 'starting'
-                "
                 type="button"
-                :disabled="busy"
-                class="shrink-0 rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-40"
-                :class="toneClass('danger')"
-                @click="toggleProject(project, $event)"
+                class="flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-1 text-left text-[11px] font-medium text-[var(--muted)] hover:bg-white/5 hover:text-[var(--text)]"
+                @click="toggleCategoryCollapsed(group.id)"
               >
-                停止
-              </button>
-              <button
-                v-else
-                type="button"
-                :disabled="busy || !project.exists"
-                class="shrink-0 rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-40"
-                :class="toneClass('ok')"
-                @click="toggleProject(project, $event)"
-              >
-                启动
+                <span class="mono w-3 shrink-0 text-[10px] opacity-70">
+                  {{ isCategoryCollapsed(group.id) ? '▸' : '▾' }}
+                </span>
+                <span class="truncate">{{ group.name }}</span>
+                <span class="mono shrink-0 text-[10px] opacity-60">{{ group.projects.length }}</span>
               </button>
             </div>
-            <div class="mt-1.5 flex items-center justify-between gap-3">
-              <p class="mono min-w-0 truncate text-[11px] text-[var(--muted)]">{{ project.id }}</p>
-              <button
-                v-if="project.hasAnalysis"
-                type="button"
-                class="shrink-0 text-[11px] text-[var(--accent)] underline-offset-2 hover:underline"
-                @click="openAnalysis(project.id, $event)"
+
+            <div v-show="!isCategoryCollapsed(group.id)">
+              <div
+                v-if="group.projects.length === 0"
+                class="mb-2 rounded-md border border-dashed border-[var(--line)] px-3 py-2 text-[11px] text-[var(--muted)]"
               >
-                查看分析总结 →
-              </button>
+                暂无项目
+              </div>
+              <div
+                v-for="project in group.projects"
+                :key="project.id"
+                role="button"
+                tabindex="0"
+                class="mb-2 cursor-pointer rounded-lg border bg-[var(--panel)]/55 px-3 py-3 transition"
+                :class="
+                  selectedId === project.id
+                    ? 'border-[var(--accent)]/50 bg-[var(--panel)]'
+                    : 'border-[var(--line)] hover:border-[var(--accent)]/30 hover:bg-[var(--panel)]'
+                "
+                @click="selectedId = project.id"
+                @keydown.enter="selectedId = project.id"
+                @contextmenu="openProjectContextMenu(project, $event)"
+              >
+                <div class="flex items-start justify-between gap-2">
+                  <div class="min-w-0 flex-1">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <span class="truncate font-medium">{{ project.name }}</span>
+                      <span
+                        class="rounded px-1.5 py-0.5 text-[10px] font-medium"
+                        :class="statusClass(project.runtime.status)"
+                      >
+                        {{ statusLabel(project.runtime.status) }}
+                      </span>
+                      <span
+                        v-if="project.git?.branch || project.branch"
+                        class="mono rounded border border-[var(--line)] px-1.5 py-0.5 text-[10px] text-[var(--muted)]"
+                        :title="`当前分支 ${(project.git?.branch || project.branch) ?? ''}`"
+                      >
+                        {{ project.git?.branch || project.branch }}
+                      </span>
+                      <span
+                        v-if="project.currentPhase"
+                        class="rounded border border-[var(--accent)]/35 px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]"
+                      >
+                        {{ project.currentPhase }}
+                      </span>
+                    </div>
+                    <div v-if="project.tags?.length" class="mt-1.5 flex flex-wrap items-center gap-1">
+                      <span
+                        v-for="tag in cardTags(project.tags).visible"
+                        :key="tag"
+                        class="rounded bg-[#0b1016] px-1.5 py-0.5 text-[10px] text-[var(--muted)]"
+                      >
+                        {{ tag }}
+                      </span>
+                      <span
+                        v-if="cardTags(project.tags).hasMore"
+                        class="rounded bg-[#0b1016] px-1.5 py-0.5 text-[10px] text-[var(--muted)]"
+                        :title="project.tags.join('、')"
+                      >
+                        …
+                      </span>
+                    </div>
+                    <p class="mt-1.5 text-[11px] text-[var(--muted)]">
+                      <template v-if="(project.startProfiles?.length ?? 0) > 1">
+                        {{ project.startProfiles.length }} 个启动模式 · 默认
+                        {{ project.defaultProfileId }}
+                      </template>
+                      <template v-else>单模式启动</template>
+                    </p>
+                  </div>
+                  <button
+                    v-if="
+                      project.runtime.status === 'running' || project.runtime.status === 'starting'
+                    "
+                    type="button"
+                    :disabled="busy"
+                    class="shrink-0 rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-40"
+                    :class="toneClass('danger')"
+                    @click="toggleProject(project, $event)"
+                  >
+                    停止
+                  </button>
+                  <button
+                    v-else
+                    type="button"
+                    :disabled="busy || !project.exists || project.needsInstall"
+                    class="shrink-0 rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-40"
+                    :class="toneClass('ok')"
+                    :title="project.needsInstall ? '请先安装依赖' : '启动'"
+                    @click="toggleProject(project, $event)"
+                  >
+                    启动
+                  </button>
+                </div>
+                <div class="mt-1.5 flex items-center justify-between gap-3">
+                  <p class="mono min-w-0 truncate text-[11px] text-[var(--muted)]">{{ project.id }}</p>
+                  <button
+                    v-if="project.hasAnalysis"
+                    type="button"
+                    class="shrink-0 text-[11px] text-[var(--accent)] underline-offset-2 hover:underline"
+                    @click="openAnalysis(project.id, $event)"
+                  >
+                    查看分析总结 →
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -1925,10 +3063,12 @@ watch(logProfileId, () => {
                 >
                   远程仓库
                   <a
-                    class="mono text-[var(--accent)] hover:underline"
+                    class="mono log-link"
                     :href="selected.repoUrl"
                     target="_blank"
                     rel="noopener noreferrer"
+                    :title="logLinkTitle"
+                    @click="onLogLinkClick"
                   >{{ selected.repoUrl }}</a>
                 </p>
                 <p
@@ -1943,14 +3083,24 @@ watch(logProfileId, () => {
                   type="button"
                   :disabled="busy || !selected.exists"
                   class="rounded-md border px-3 py-1.5 text-xs font-medium disabled:opacity-40"
-                  :class="toneClass()"
+                  :class="
+                    selected.needsInstall
+                      ? 'border-[var(--accent)]/50 bg-[var(--accent)]/15 text-[var(--accent)]'
+                      : toneClass()
+                  "
+                  :title="selected.needsInstall ? '拉取后请先安装依赖' : '安装依赖'"
                   @click="installSelected"
                 >
-                  安装依赖
+                  {{ selected.needsInstall ? '① 安装依赖' : '安装依赖' }}
                 </button>
                 <select
                   :value="buildProfileId"
-                  :disabled="busy || !selected.exists || !(selected.buildProfiles?.length)"
+                  :disabled="
+                    busy ||
+                    !selected.exists ||
+                    selected.needsInstall ||
+                    !(selected.buildProfiles?.length)
+                  "
                   class="max-w-[10rem] rounded-md border border-[var(--line)] bg-[#0b1016] px-2 py-1.5 text-xs outline-none disabled:opacity-40"
                   @change="onBuildProfileChange"
                 >
@@ -1964,9 +3114,12 @@ watch(logProfileId, () => {
                 </select>
                 <button
                   type="button"
-                  :disabled="busy || !selected.exists || !buildProfileId"
+                  :disabled="
+                    busy || !selected.exists || selected.needsInstall || !buildProfileId
+                  "
                   class="rounded-md border px-3 py-1.5 text-xs font-medium disabled:opacity-40"
                   :class="toneClass('ok')"
+                  :title="selected.needsInstall ? '请先安装依赖' : '构建'"
                   @click="buildSelected()"
                 >
                   构建
@@ -2040,21 +3193,44 @@ watch(logProfileId, () => {
                   重新克隆恢复
                 </button>
               </div>
-              <div v-if="projectUrls(selected).length" class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
-                <span class="text-xs text-[var(--muted)]">运行地址</span>
-                <a
-                  v-for="url in projectUrls(selected)"
-                  :key="url"
-                  :href="url"
-                  target="_blank"
-                  rel="noreferrer"
-                  class="mono text-xs text-[var(--accent)] hover:underline"
+              <div
+                v-else-if="selected.needsInstall"
+                class="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-[var(--warn)]/40 bg-[#3a3420]/50 px-3 py-2 text-xs text-[var(--warn)]"
+              >
+                <span>拉取后请先安装依赖，否则无法启动与构建。</span>
+                <button
+                  type="button"
+                  class="rounded border border-[var(--accent)]/40 bg-[var(--accent)]/15 px-2 py-1 text-[11px] font-medium text-[var(--accent)] hover:brightness-110 disabled:opacity-40"
+                  :disabled="busy"
+                  @click="installSelected"
                 >
-                  {{ url }}
-                </a>
+                  立即安装
+                </button>
+              </div>
+              <div v-if="projectUrls(selected).length" class="mt-2 space-y-1">
+                <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span class="text-xs text-[var(--muted)]">
+                    {{ hasDetectedUrls(selected) ? '运行地址（探测优先）' : '运行地址' }}
+                  </span>
+                  <a
+                    v-for="url in projectUrls(selected)"
+                    :key="url"
+                    :href="url"
+                    target="_blank"
+                    rel="noreferrer"
+                    class="mono text-xs log-link"
+                    :title="logLinkTitle"
+                    @click="onLogLinkClick"
+                  >
+                    {{ url }}
+                  </a>
+                </div>
+                <p v-if="hasDetectedUrls(selected)" class="text-[11px] text-[var(--muted)]">
+                  已从日志解析真实地址；若框架自动换端口，以探测结果为准。
+                </p>
               </div>
               <p v-else class="mt-2 text-xs text-[var(--muted)]">
-                暂无运行地址：可在各启动模式中配置，或等待日志出现 Local / Server 地址后自动探测。
+                暂无运行地址：启动后会从日志自动探测 Local / Server 地址；也可在启动模式中预登记 openUrl。
               </p>
               <p v-if="selected.git?.head" class="mt-1 text-xs text-[var(--muted)]">
                 {{ selected.git.branch }}@{{ selected.git.head }}{{ selected.git.dirty ? ' *' : '' }}
@@ -2108,6 +3284,47 @@ watch(logProfileId, () => {
                         {{ item.profile.command }}
                         <span v-if="item.profile.cwd"> · cwd {{ item.profile.cwd }}</span>
                       </p>
+                      <div
+                        v-if="profileDetectedUrls(item).length"
+                        class="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1"
+                      >
+                        <span class="rounded bg-[var(--accent)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]">
+                          已探测
+                        </span>
+                        <a
+                          v-for="url in profileDetectedUrls(item)"
+                          :key="url"
+                          :href="url"
+                          target="_blank"
+                          rel="noreferrer"
+                          class="mono text-[11px] log-link"
+                          :title="logLinkTitle"
+                          @click="onLogLinkClick"
+                        >
+                          {{ url }}
+                        </a>
+                      </div>
+                      <div
+                        v-else-if="profileConfiguredOnlyUrls(item).length"
+                        class="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1"
+                      >
+                        <span class="rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-[var(--muted)]">
+                          登记
+                        </span>
+                        <a
+                          v-for="url in profileConfiguredOnlyUrls(item)"
+                          :key="url"
+                          :href="url"
+                          target="_blank"
+                          rel="noreferrer"
+                          class="mono text-[11px] log-link"
+                          :title="logLinkTitle"
+                          @click="onLogLinkClick"
+                        >
+                          {{ url }}
+                        </a>
+                        <span class="text-[10px] text-[var(--muted)]">启动后以日志探测为准</span>
+                      </div>
                       <p v-if="item.profile.description" class="mt-1 text-[11px] text-[var(--muted)]">
                         {{ item.profile.description }}
                       </p>
@@ -2143,9 +3360,10 @@ watch(logProfileId, () => {
                       <button
                         v-else
                         type="button"
-                        :disabled="busy || !selected.exists"
+                        :disabled="busy || !selected.exists || selected.needsInstall"
                         class="rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-40"
                         :class="toneClass('ok')"
+                        :title="selected.needsInstall ? '请先安装依赖' : '启动'"
                         @click="toggleProfile(item.profile.id, false)"
                       >
                         启动
@@ -2201,9 +3419,10 @@ watch(logProfileId, () => {
                       </button>
                       <button
                         type="button"
-                        :disabled="busy || !selected.exists"
+                        :disabled="busy || !selected.exists || selected.needsInstall"
                         class="rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-40"
                         :class="toneClass('ok')"
+                        :title="selected.needsInstall ? '请先安装依赖' : '构建'"
                         @click="buildSelected(item.id)"
                       >
                         构建
@@ -2211,6 +3430,41 @@ watch(logProfileId, () => {
                     </div>
                   </div>
                 </div>
+              </div>
+
+              <div class="mt-2 flex flex-wrap items-center gap-2">
+                <span class="text-xs text-[var(--muted)]">项目分类</span>
+                <select
+                  v-model="categoryIdDraft"
+                  class="min-w-[10rem] rounded border border-[var(--line)] bg-[#0b1016] px-2 py-1 text-xs outline-none focus:border-[var(--accent)]"
+                >
+                  <option value="">未分类（可不选）</option>
+                  <option
+                    v-for="item in categories"
+                    :key="item.id"
+                    :value="item.id"
+                  >
+                    {{ item.name }}
+                  </option>
+                </select>
+                <button
+                  type="button"
+                  :disabled="busy"
+                  class="rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-40"
+                  :class="toneClass()"
+                  @click="saveSelectedCategory"
+                >
+                  保存分类
+                </button>
+                <button
+                  type="button"
+                  :disabled="busy"
+                  class="rounded border px-2 py-1 text-[11px] font-medium text-[var(--muted)] disabled:opacity-40"
+                  :class="toneClass()"
+                  @click="openCreateCategory"
+                >
+                  新建
+                </button>
               </div>
 
               <div class="mt-2 flex flex-wrap items-center gap-2">
@@ -2287,7 +3541,7 @@ watch(logProfileId, () => {
                     构建 · {{ item.name }}
                   </option>
                 </select>
-                <span class="text-xs text-[var(--muted)]">自动刷新 · 近 300 行</span>
+                <span class="text-xs text-[var(--muted)]">自动刷新 · 近 300 行 · {{ logLinkTitle }}</span>
                 <button
                   type="button"
                   :disabled="busy || logs.length === 0"
@@ -2325,7 +3579,18 @@ watch(logProfileId, () => {
                 :class="logClass(line.stream)"
               >
                 <span class="text-[var(--muted)]">{{ line.ts.slice(11, 19) }} </span>
-                {{ stripAnsi(line.text) }}
+                <template v-for="(part, partIndex) in logLineParts(line.text)" :key="partIndex">
+                  <a
+                    v-if="part.type === 'url'"
+                    :href="part.value"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="log-link"
+                    :title="logLinkTitle"
+                    @click="onLogLinkClick"
+                  >{{ part.value }}</a>
+                  <span v-else>{{ part.value }}</span>
+                </template>
               </div>
             </div>
 
@@ -2338,6 +3603,7 @@ watch(logProfileId, () => {
                 v-else-if="analysis?.exists && analysisHtml"
                 class="analysis-doc"
                 v-html="analysisHtml"
+                @click="onLogLinkClick"
               />
               <div v-else class="text-sm text-[var(--muted)]">
                 <p>尚未生成项目分析总结。已登录时首次「添加仓库」会走 Cloud AI（计配额）；未登录或失败则本地启发式。本页按钮仅本地规则。</p>
@@ -2559,7 +3825,7 @@ watch(logProfileId, () => {
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
     >
       <form
-        class="w-full max-w-lg rounded-xl border border-[var(--line)] bg-[var(--panel)] p-5 shadow-2xl"
+        class="relative w-full max-w-lg rounded-xl border border-[var(--line)] bg-[var(--panel)] p-5 shadow-2xl"
         @submit="submitAdd"
       >
         <h3 class="text-lg font-medium">添加 Git 仓库</h3>
@@ -2575,56 +3841,222 @@ watch(logProfileId, () => {
           <button
             type="button"
             class="ml-2 text-[var(--accent)] hover:underline"
+            :disabled="addSubmitting"
             @click="openUpgrade('project')"
           >
             查看升级
           </button>
         </p>
+        <p
+          v-if="addError"
+          class="mt-3 rounded-md border border-[var(--danger)]/40 bg-[#3a2220] px-3 py-2 text-sm text-[var(--danger)]"
+        >
+          {{ addError }}
+        </p>
+        <div
+          v-if="addSubmitting"
+          class="mt-3 rounded-lg border border-[var(--accent)]/35 bg-[var(--accent)]/10 px-3 py-3"
+        >
+          <div class="flex items-start gap-3">
+            <span
+              class="mt-0.5 inline-block h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-[var(--accent)]/30 border-t-[var(--accent)]"
+            />
+            <div class="min-w-0 flex-1">
+              <p class="text-sm text-[var(--text)]">{{ addProgressLabel || '处理中…' }}</p>
+              <template v-if="addCloneProgress">
+                <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-[#0b1016]">
+                  <div
+                    class="h-full rounded-full bg-[var(--accent)] transition-[width] duration-200"
+                    :style="{ width: `${Math.min(100, addCloneProgress.percent)}%` }"
+                  />
+                </div>
+                <p class="mt-1.5 text-xs text-[var(--muted)]">
+                  已下载
+                  <span class="mono text-[var(--text)]">{{ addCloneProgress.received }}</span>
+                  /
+                  <span class="mono text-[var(--text)]">{{ addCloneProgress.total }}</span>
+                  ，剩余
+                  <span class="mono text-[var(--text)]">{{ addCloneProgress.remaining }}</span>
+                  <span v-if="addCloneProgress.speed"> · {{ addCloneProgress.speed }}</span>
+                </p>
+              </template>
+              <p
+                v-else-if="addInstallLog"
+                class="mono mt-1.5 truncate text-xs text-[var(--muted)]"
+                :title="addInstallLog"
+              >
+                {{ addInstallLog }}
+              </p>
+              <p class="mt-1 text-xs text-[var(--muted)]">
+                已用时 {{ addProgressElapsed }} 秒 · 请勿关闭
+              </p>
+            </div>
+          </div>
+        </div>
+        <fieldset
+          class="mt-1 min-w-0 border-0 p-0 disabled:opacity-60"
+          :disabled="addSubmitting"
+        >
+          <label class="mt-3 block text-sm">
+            仓库 URL
+            <input
+              v-model="repoUrl"
+              required
+              placeholder="https://github.com/org/repo.git"
+              class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
+            />
+          </label>
+          <label class="mt-3 block text-sm">
+            分支（可选）
+            <select
+              v-if="remoteBranches.length > 0"
+              v-model="branch"
+              class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
+            >
+              <option value="">自动（优先默认分支）</option>
+              <option
+                v-for="item in remoteBranches"
+                :key="item"
+                :value="item"
+              >
+                {{ item }}{{ item === remoteDefaultBranch ? '（默认）' : '' }}
+              </option>
+            </select>
+            <input
+              v-else
+              v-model="branch"
+              :placeholder="
+                remoteBranchesLoading
+                  ? '正在读取远程分支…'
+                  : '留空自动识别；也可填 main / master'
+              "
+              class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
+            />
+            <p
+              v-if="remoteBranchesLoading"
+              class="mt-1 text-xs text-[var(--muted)]"
+            >
+              正在探测远程分支…
+            </p>
+            <p
+              v-else-if="remoteBranchesError"
+              class="mt-1 text-xs text-[var(--warn)]"
+            >
+              {{ remoteBranchesError }}（仍可手动填写分支）
+            </p>
+            <p
+              v-else-if="remoteBranches.length > 0"
+              class="mt-1 text-xs text-[var(--muted)]"
+            >
+              已探测到 {{ remoteBranches.length }} 个分支
+            </p>
+          </label>
+          <label class="mt-3 block text-sm">
+            启动命令（可选）
+            <input
+              v-model="startCommand"
+              placeholder="留空则导入后自动分析"
+              class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
+            />
+          </label>
+          <div class="mt-3">
+            <div class="flex items-center justify-between gap-2 text-sm">
+              <span>项目分类（可选）</span>
+              <button
+                type="button"
+                class="text-xs text-[var(--accent)] hover:underline disabled:opacity-40"
+                :disabled="addSubmitting"
+                @click="openCreateCategory"
+              >
+                新建分类
+              </button>
+            </div>
+            <select
+              v-model="categoryIdInput"
+              class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]"
+            >
+              <option value="">未分类（可不选）</option>
+              <option
+                v-for="item in categories"
+                :key="item.id"
+                :value="item.id"
+              >
+                {{ item.name }}
+              </option>
+            </select>
+            <p class="mt-1 text-xs text-[var(--muted)]">
+              {{
+                categories.length === 0
+                  ? '暂无分类，可点右上角新建，或稍后在详情里调整'
+                  : `可选 ${categories.length} 个分类，不选则放入「未分类」`
+              }}
+            </p>
+          </div>
+          <label class="mt-3 block text-sm">
+            运行地址（可选）
+            <input
+              v-model="openUrl"
+              type="url"
+              placeholder="http://127.0.0.1:5173"
+              class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
+            />
+          </label>
+          <label class="mt-3 block text-sm">
+            分类标签（可选，逗号分隔）
+            <input
+              v-model="tagsInput"
+              placeholder="LLM, 网关, 自托管"
+              class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
+            />
+          </label>
+          <label class="mt-3 block text-sm">
+            upstream（可选，fork 同步用）
+            <input
+              v-model="upstreamUrl"
+              placeholder="https://github.com/upstream/repo.git"
+              class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
+            />
+          </label>
+        </fieldset>
+        <div class="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            class="rounded-lg px-4 py-2 text-sm text-[var(--muted)] hover:text-white disabled:opacity-40"
+            :disabled="addSubmitting"
+            @click="showAdd = false; addError = null"
+          >
+            取消
+          </button>
+          <button
+            type="submit"
+            :disabled="addSubmitting || busy || !repoUrl.trim()"
+            class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[#06221f] disabled:opacity-50"
+          >
+            {{ addSubmitting ? '处理中…' : '克隆并登记' }}
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <div
+      v-if="showCategoryModal"
+      class="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4"
+      @click.self="showCategoryModal = false"
+    >
+      <form
+        class="w-full max-w-sm rounded-xl border border-[var(--line)] bg-[var(--panel)] p-5 shadow-2xl"
+        @submit="submitCategoryModal"
+      >
+        <h3 class="text-lg font-medium">
+          {{ categoryModalMode === 'create' ? '新建分类' : '重命名分类' }}
+        </h3>
         <label class="mt-4 block text-sm">
-          仓库 URL
+          分类名称
           <input
-            v-model="repoUrl"
+            v-model="categoryNameDraft"
             required
-            placeholder="https://github.com/org/repo.git"
-            class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
-          />
-        </label>
-        <label class="mt-3 block text-sm">
-          分支
-          <input
-            v-model="branch"
-            class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
-          />
-        </label>
-        <label class="mt-3 block text-sm">
-          启动命令
-          <input
-            v-model="startCommand"
-            class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
-          />
-        </label>
-        <label class="mt-3 block text-sm">
-          运行地址（可选）
-          <input
-            v-model="openUrl"
-            type="url"
-            placeholder="http://127.0.0.1:5173"
-            class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
-          />
-        </label>
-        <label class="mt-3 block text-sm">
-          分类标签（可选，逗号分隔）
-          <input
-            v-model="tagsInput"
-            placeholder="LLM, 网关, 自托管"
-            class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
-          />
-        </label>
-        <label class="mt-3 block text-sm">
-          upstream（可选，fork 同步用）
-          <input
-            v-model="upstreamUrl"
-            placeholder="https://github.com/upstream/repo.git"
+            maxlength="64"
+            placeholder="如：生产工具、实验项目"
             class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
           />
         </label>
@@ -2632,19 +4064,288 @@ watch(logProfileId, () => {
           <button
             type="button"
             class="rounded-lg px-4 py-2 text-sm text-[var(--muted)] hover:text-white"
-            @click="showAdd = false"
+            @click="showCategoryModal = false"
           >
             取消
           </button>
           <button
             type="submit"
-            :disabled="busy"
+            :disabled="busy || !categoryNameDraft.trim()"
             class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[#06221f] disabled:opacity-50"
           >
-            克隆并登记
+            {{ categoryModalMode === 'create' ? '创建' : '保存' }}
           </button>
         </div>
       </form>
+    </div>
+
+    <div
+      v-if="showRenameProject"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      @click.self="showRenameProject = false"
+    >
+      <form
+        class="w-full max-w-sm rounded-xl border border-[var(--line)] bg-[var(--panel)] p-5 shadow-2xl"
+        @submit="submitRenameProject"
+      >
+        <h3 class="text-lg font-medium">重命名项目</h3>
+        <label class="mt-4 block text-sm">
+          显示名称
+          <input
+            v-model="renameProjectDraft"
+            required
+            maxlength="64"
+            class="mt-1 w-full rounded-lg border border-[var(--line)] bg-[#0b1016] px-3 py-2 outline-none focus:border-[var(--accent)]"
+          />
+        </label>
+        <div class="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            class="rounded-lg px-4 py-2 text-sm text-[var(--muted)] hover:text-white"
+            @click="showRenameProject = false"
+          >
+            取消
+          </button>
+          <button
+            type="submit"
+            :disabled="busy || !renameProjectDraft.trim()"
+            class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[#06221f] disabled:opacity-50"
+          >
+            保存
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <!-- 侧栏右键菜单 -->
+    <div
+      v-if="contextMenu"
+      data-context-menu
+      class="fixed z-[70] min-w-[11rem] rounded-lg border border-[var(--line)] bg-[var(--panel)] py-1 shadow-2xl"
+      :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+      @contextmenu.prevent
+    >
+      <template v-if="contextMenu.kind === 'project' && contextProject">
+        <button
+          type="button"
+          class="block w-full px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5"
+          @click="closeContextMenu(); selectedId = contextProject.id"
+        >
+          查看详情
+        </button>
+        <button
+          type="button"
+          class="block w-full px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5 disabled:opacity-40"
+          :disabled="
+            busy ||
+            (!contextProject.exists && contextProject.runtime.status === 'stopped') ||
+            (contextProject.needsInstall &&
+              contextProject.runtime.status !== 'running' &&
+              contextProject.runtime.status !== 'starting')
+          "
+          @click="toggleContextProject"
+        >
+          {{
+            contextProject.runtime.status === 'running' ||
+            contextProject.runtime.status === 'starting'
+              ? '停止'
+              : contextProject.needsInstall
+                ? '请先安装依赖'
+                : '启动'
+          }}
+        </button>
+        <button
+          type="button"
+          class="block w-full px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5"
+          @click="openRenameProject(contextProject)"
+        >
+          重命名
+        </button>
+        <div class="relative">
+          <button
+            type="button"
+            class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5 disabled:opacity-40"
+            :disabled="!contextProject.exists || !contextProject.isGitRepo"
+            @click="
+              contextBranchOpen = !contextBranchOpen;
+              contextMoveOpen = false;
+              if (contextBranchOpen && contextBranches.length === 0 && !contextBranchesLoading) {
+                void loadContextBranches(contextProject.id);
+              }
+            "
+          >
+            <span>
+              分支
+              <span
+                v-if="contextBranchCurrent"
+                class="mono text-[var(--muted)]"
+              >
+                · {{ contextBranchCurrent }}
+              </span>
+            </span>
+            <span class="text-[var(--muted)]">{{ contextBranchOpen ? '▾' : '▸' }}</span>
+          </button>
+          <div
+            v-if="contextBranchOpen"
+            class="max-h-48 overflow-y-auto border-t border-[var(--line)] bg-[#0b1016]/80 py-1"
+          >
+            <p
+              v-if="contextBranchesLoading"
+              class="px-4 py-1.5 text-xs text-[var(--muted)]"
+            >
+              正在读取分支…
+            </p>
+            <p
+              v-else-if="contextBranchesError"
+              class="px-4 py-1.5 text-xs text-[var(--warn)]"
+            >
+              {{ contextBranchesError }}
+            </p>
+            <p
+              v-else-if="contextBranches.length === 0"
+              class="px-4 py-1.5 text-xs text-[var(--muted)]"
+            >
+              暂无分支
+            </p>
+            <button
+              v-for="item in contextBranches"
+              :key="item"
+              type="button"
+              class="block w-full px-4 py-1.5 text-left text-xs hover:bg-white/5"
+              :class="
+                item === contextBranchCurrent
+                  ? 'text-[var(--accent)]'
+                  : 'text-[var(--text)]'
+              "
+              :disabled="busy || item === contextBranchCurrent"
+              @click="checkoutContextBranch(item)"
+            >
+              <span class="mono">{{ item }}</span>
+              <span
+                v-if="item === contextBranchCurrent"
+                class="ml-1 text-[10px] opacity-80"
+              >
+                当前
+              </span>
+            </button>
+          </div>
+        </div>
+        <div class="relative">
+          <button
+            type="button"
+            class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5"
+            @click="contextMoveOpen = !contextMoveOpen; contextBranchOpen = false"
+          >
+            <span>移动到</span>
+            <span class="text-[var(--muted)]">{{ contextMoveOpen ? '▾' : '▸' }}</span>
+          </button>
+          <div
+            v-if="contextMoveOpen"
+            class="border-t border-[var(--line)] bg-[#0b1016]/80 py-1"
+          >
+            <button
+              type="button"
+              class="block w-full px-4 py-1.5 text-left text-xs hover:bg-white/5"
+              :class="
+                !contextProject.categoryId
+                  ? 'text-[var(--accent)]'
+                  : 'text-[var(--text)]'
+              "
+              @click="moveProjectToCategory(contextProject.id, '')"
+            >
+              未分类
+            </button>
+            <button
+              v-for="item in categories"
+              :key="item.id"
+              type="button"
+              class="block w-full px-4 py-1.5 text-left text-xs hover:bg-white/5"
+              :class="
+                contextProject.categoryId === item.id
+                  ? 'text-[var(--accent)]'
+                  : 'text-[var(--text)]'
+              "
+              @click="moveProjectToCategory(contextProject.id, item.id)"
+            >
+              {{ item.name }}
+            </button>
+            <button
+              type="button"
+              class="mt-0.5 block w-full border-t border-[var(--line)] px-4 py-1.5 text-left text-xs text-[var(--muted)] hover:bg-white/5 hover:text-[var(--text)]"
+              @click="openCreateCategory"
+            >
+              新建分类…
+            </button>
+          </div>
+        </div>
+        <button
+          v-if="contextProject.hasAnalysis"
+          type="button"
+          class="block w-full px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5"
+          @click="openAnalysis(contextProject.id)"
+        >
+          查看分析总结
+        </button>
+        <div class="my-1 border-t border-[var(--line)]" />
+        <button
+          type="button"
+          class="block w-full px-3 py-1.5 text-left text-xs text-[var(--danger)] hover:bg-[var(--danger)]/10"
+          :disabled="busy"
+          @click="removeContextProject"
+        >
+          移除登记
+        </button>
+      </template>
+
+      <template v-else-if="contextMenu.kind === 'category' && contextCategoryGroup">
+        <button
+          type="button"
+          class="block w-full px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5"
+          @click="
+            closeContextMenu();
+            toggleCategoryCollapsed(contextCategoryGroup.id)
+          "
+        >
+          {{ isCategoryCollapsed(contextCategoryGroup.id) ? '展开' : '收起' }}
+        </button>
+        <button
+          type="button"
+          class="block w-full px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5"
+          @click="
+            openAddProjectInCategory(
+              contextCategoryGroup.isUncategorized ? '' : contextCategoryGroup.id,
+            )
+          "
+        >
+          在此添加仓库
+        </button>
+        <template v-if="!contextCategoryGroup.isUncategorized">
+          <button
+            type="button"
+            class="block w-full px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5"
+            @click="openRenameCategory(contextCategoryGroup.id)"
+          >
+            重命名
+          </button>
+          <div class="my-1 border-t border-[var(--line)]" />
+          <button
+            type="button"
+            class="block w-full px-3 py-1.5 text-left text-xs text-[var(--danger)] hover:bg-[var(--danger)]/10"
+            :disabled="busy"
+            @click="deleteCategoryById(contextCategoryGroup.id)"
+          >
+            删除分类
+          </button>
+        </template>
+        <button
+          v-else
+          type="button"
+          class="block w-full px-3 py-1.5 text-left text-xs text-[var(--muted)] hover:bg-white/5 hover:text-[var(--text)]"
+          @click="openCreateCategory"
+        >
+          新建分类…
+        </button>
+      </template>
     </div>
     </template>
 
@@ -2687,6 +4388,46 @@ watch(logProfileId, () => {
             <p>6. 你的权利：可申请查阅、更正或注销账号相关数据（需按运营方流程核实身份）。</p>
             <p>7. 联系：隐私相关问题可通过产品内公示的联系方式与运营方沟通。</p>
           </template>
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="switchJobOpen"
+      class="fixed inset-0 z-[65] flex items-center justify-center bg-black/55 p-4"
+    >
+      <div class="w-full max-w-md rounded-xl border border-[var(--line)] bg-[var(--panel)] p-5 shadow-2xl">
+        <h3 class="text-lg font-medium">切换分支</h3>
+        <p class="mt-1 text-sm text-[var(--muted)]">{{ switchJobTitle }}</p>
+        <div class="mt-3 rounded-lg border border-[var(--accent)]/35 bg-[var(--accent)]/10 px-3 py-3">
+          <div class="flex items-start gap-3">
+            <span
+              class="mt-0.5 inline-block h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-[var(--accent)]/30 border-t-[var(--accent)]"
+            />
+            <div class="min-w-0 flex-1">
+              <p class="text-sm text-[var(--text)]">{{ switchJobLabel || '处理中…' }}</p>
+              <template v-if="switchJobProgress">
+                <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-[#0b1016]">
+                  <div
+                    class="h-full rounded-full bg-[var(--accent)] transition-[width] duration-200"
+                    :style="{ width: `${Math.min(100, switchJobProgress.percent)}%` }"
+                  />
+                </div>
+                <p class="mt-1.5 text-xs text-[var(--muted)]">
+                  已下载
+                  <span class="mono text-[var(--text)]">{{ switchJobProgress.received }}</span>
+                  /
+                  <span class="mono text-[var(--text)]">{{ switchJobProgress.total }}</span>
+                  ，剩余
+                  <span class="mono text-[var(--text)]">{{ switchJobProgress.remaining }}</span>
+                  <span v-if="switchJobProgress.speed"> · {{ switchJobProgress.speed }}</span>
+                </p>
+              </template>
+              <p class="mt-1 text-xs text-[var(--muted)]">
+                已用时 {{ switchJobElapsed }} 秒 · 请勿关闭
+              </p>
+            </div>
+          </div>
         </div>
       </div>
     </div>

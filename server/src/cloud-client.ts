@@ -34,6 +34,7 @@ export type CatalogProject = {
   openUrl: string | null;
   upstreamUrl: string | null;
   tags: string[];
+  categoryId?: string | null;
   notes: string;
   createdAt: string;
   updatedAt: string;
@@ -43,6 +44,20 @@ export type CatalogProject = {
   defaultBuildProfileId?: string | null;
   phases?: ProjectRecord['phases'];
   currentPhase?: string | null;
+};
+
+/** 可同步到云端的分类 */
+export type CatalogCategory = {
+  id: string;
+  name: string;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CatalogPayload = {
+  projects: CatalogProject[];
+  categories: CatalogCategory[];
 };
 
 type AuthSuccess = {
@@ -68,6 +83,7 @@ export function toCatalogProject(record: ProjectRecord): CatalogProject {
     openUrl: record.openUrl,
     upstreamUrl: record.upstreamUrl,
     tags: record.tags,
+    categoryId: record.categoryId ?? null,
     notes: record.notes,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
@@ -257,25 +273,40 @@ export async function cloudFetchMe(): Promise<CloudMeUser | null> {
 /**
  * 拉取云端清单。
  *
- * @returns 项目列表
+ * @returns 项目与分类
  */
-export async function cloudGetCatalog(): Promise<CatalogProject[]> {
-  const data = await cloudFetch<{ projects: CatalogProject[] }>('/v1/catalog');
-  return data.projects ?? [];
+export async function cloudGetCatalog(): Promise<CatalogPayload> {
+  const data = await cloudFetch<{
+    projects: CatalogProject[];
+    categories?: CatalogCategory[];
+  }>('/v1/catalog');
+  return {
+    projects: data.projects ?? [],
+    categories: data.categories ?? [],
+  };
 }
 
 /**
  * 覆盖推送本机清单到云端。
  *
- * @param projects - 清单
+ * @param payload - 项目与分类
  * @returns 云端回写列表
  */
-export async function cloudPutCatalog(projects: CatalogProject[]): Promise<CatalogProject[]> {
-  const data = await cloudFetch<{ projects: CatalogProject[] }>('/v1/catalog', {
+export async function cloudPutCatalog(payload: CatalogPayload): Promise<CatalogPayload> {
+  const data = await cloudFetch<{
+    projects: CatalogProject[];
+    categories?: CatalogCategory[];
+  }>('/v1/catalog', {
     method: 'PUT',
-    body: JSON.stringify({ projects }),
+    body: JSON.stringify({
+      projects: payload.projects,
+      categories: payload.categories,
+    }),
   });
-  return data.projects ?? [];
+  return {
+    projects: data.projects ?? [],
+    categories: data.categories ?? [],
+  };
 }
 
 /**

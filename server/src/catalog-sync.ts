@@ -1,34 +1,63 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { CatalogProject } from './cloud-client.js';
+import type { CatalogCategory, CatalogPayload, CatalogProject } from './cloud-client.js';
 import { toCatalogProject, cloudPutCatalog } from './cloud-client.js';
 import { getAuthToken } from './auth-store.js';
 import { cloneRepository } from './git.js';
 import { normalizeProjectRecord } from './profiles.js';
 import { refreshRecordProfiles } from './package-profiles.js';
 import {
-  findProject,
+  loadCategories,
   loadProjects,
   PROJECTS_DIR,
   resolveProjectPath,
-  saveProjects,
+  saveStore,
   upsertProject,
+  findProject,
 } from './store.js';
 import { toProjectView } from './projects-service.js';
-import type { ProjectRecord, ProjectView } from './types.js';
+import type { CategoryRecord, ProjectRecord, ProjectView } from './types.js';
+
+/**
+ * 规范化云端分类项为本机记录。
+ *
+ * @param item - 云端分类
+ * @param index - 缺省排序
+ * @returns 本机分类
+ */
+function toLocalCategory(item: CatalogCategory, index: number): CategoryRecord {
+  const now = new Date().toISOString();
+  return {
+    id: item.id,
+    name: item.name,
+    sortOrder: typeof item.sortOrder === 'number' ? item.sortOrder : index,
+    createdAt: item.createdAt || now,
+    updatedAt: item.updatedAt || item.createdAt || now,
+  };
+}
 
 /**
  * 用云端清单覆盖本机 projects.json（path 统一为 projects/<id>）。
  * 覆盖后会按本地 package.json 补全启动/构建模式。
  *
- * @param catalog - 云端项目列表
+ * @param catalog - 云端项目与分类
  * @returns 写入后的本机记录
  */
 export async function syncLocalCatalogFromCloud(
-  catalog: CatalogProject[],
+  catalog: CatalogPayload | CatalogProject[],
 ): Promise<ProjectRecord[]> {
   const now = new Date().toISOString();
-  const next: ProjectRecord[] = catalog.map((item) =>
+  const payload: CatalogPayload = Array.isArray(catalog)
+    ? { projects: catalog, categories: [] }
+    : {
+        projects: catalog.projects ?? [],
+        categories: catalog.categories ?? [],
+      };
+
+  const categories = payload.categories.map((item, index) => toLocalCategory(item, index));
+  const categoryIds = new Set(categories.map((item) => item.id));
+
+  const next: ProjectRecord[] = payload.projects.map((item) =>
     normalizeProjectRecord({
       id: item.id,
       name: item.name,
@@ -40,6 +69,8 @@ export async function syncLocalCatalogFromCloud(
       openUrl: item.openUrl,
       upstreamUrl: item.upstreamUrl,
       tags: item.tags,
+      categoryId:
+        item.categoryId && categoryIds.has(item.categoryId) ? item.categoryId : null,
       notes: item.notes,
       createdAt: item.createdAt || now,
       updatedAt: item.updatedAt || now,
@@ -55,8 +86,20 @@ export async function syncLocalCatalogFromCloud(
     const root = resolveProjectPath(record.path);
     return refreshRecordProfiles(record, root) ?? record;
   });
-  saveProjects(enriched);
+  saveStore({ projects: enriched, categories });
   return enriched;
+}
+
+/**
+ * 组装当前本机清单推送载荷。
+ *
+ * @returns 云端清单载荷
+ */
+export function buildLocalCatalogPayload(): CatalogPayload {
+  return {
+    projects: loadProjects().map(toCatalogProject),
+    categories: loadCategories(),
+  };
 }
 
 /**
@@ -69,7 +112,7 @@ export async function pushCatalogIfLoggedIn(): Promise<void> {
     return;
   }
   try {
-    await cloudPutCatalog(loadProjects().map(toCatalogProject));
+    await cloudPutCatalog(buildLocalCatalogPayload());
   } catch (error) {
     console.warn(
       '[labhub] 推送清单到 Cloud 失败',
@@ -106,14 +149,21 @@ export async function restoreProjectFromCatalog(
     path: path.join('projects', record.id),
     updatedAt: new Date().toISOString(),
   });
-  await cloneRepository({
+  const cloned = await cloneRepository({
     repoUrl: next.repoUrl,
     targetDir: absolutePath,
     branch: next.branch,
     shallow: true,
     upstreamUrl: next.upstreamUrl,
   });
-  const withProfiles = refreshRecordProfiles(next, absolutePath) ?? next;
+  const withProfiles = refreshRecordProfiles(
+    {
+      ...next,
+      branch: cloned.branch,
+      updatedAt: new Date().toISOString(),
+    },
+    absolutePath,
+  ) ?? { ...next, branch: cloned.branch };
   upsertProject(withProfiles);
   return toProjectView(withProfiles);
 }

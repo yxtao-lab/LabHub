@@ -13,9 +13,12 @@ import {
   cloudRegister,
   cloudSendSms,
   cloudVerifySms,
-  toCatalogProject,
 } from '../cloud-client.js';
-import { restoreProjectFromCatalog, syncLocalCatalogFromCloud } from '../catalog-sync.js';
+import {
+  buildLocalCatalogPayload,
+  restoreProjectFromCatalog,
+  syncLocalCatalogFromCloud,
+} from '../catalog-sync.js';
 import { toProjectView } from '../projects-service.js';
 import { requireLocalLogin } from '../require-auth.js';
 import { loadProjects } from '../store.js';
@@ -87,7 +90,7 @@ authRouter.post('/login', async (req, res, next) => {
     const { user } = await cloudLoginPassword(phone, password);
     const catalog = await cloudGetCatalog();
     await syncLocalCatalogFromCloud(catalog);
-    res.json({ user, registered: false, projectCount: catalog.length });
+    res.json({ user, registered: false, projectCount: catalog.projects.length });
   } catch (error) {
     next(error);
   }
@@ -106,7 +109,7 @@ authRouter.post('/register', async (req, res, next) => {
     const { user } = await cloudRegister({ phone, password, code, inviteCode });
     const catalog = await cloudGetCatalog();
     await syncLocalCatalogFromCloud(catalog);
-    res.status(201).json({ user, registered: true, projectCount: catalog.length });
+    res.status(201).json({ user, registered: true, projectCount: catalog.projects.length });
   } catch (error) {
     next(error);
   }
@@ -122,7 +125,7 @@ authRouter.post('/sms/verify', async (req, res, next) => {
     const { user } = await cloudVerifySms(phone, code);
     const catalog = await cloudGetCatalog();
     await syncLocalCatalogFromCloud(catalog);
-    res.json({ user, registered: false, projectCount: catalog.length });
+    res.json({ user, registered: false, projectCount: catalog.projects.length });
   } catch (error) {
     next(error);
   }
@@ -141,9 +144,8 @@ authRouter.post('/logout', (_req, res) => {
  */
 authRouter.post('/sync-catalog', requireLocalLogin, async (_req, res, next) => {
   try {
-    const projects = loadProjects().map(toCatalogProject);
-    const saved = await cloudPutCatalog(projects);
-    res.json({ projects: saved });
+    const saved = await cloudPutCatalog(buildLocalCatalogPayload());
+    res.json({ projects: saved.projects, categories: saved.categories });
   } catch (error) {
     next(error);
   }
@@ -156,7 +158,7 @@ authRouter.post('/pull-catalog', requireLocalLogin, async (_req, res, next) => {
   try {
     const catalog = await cloudGetCatalog();
     const projects = await syncLocalCatalogFromCloud(catalog);
-    res.json({ projects });
+    res.json({ projects, categories: catalog.categories });
   } catch (error) {
     next(error);
   }

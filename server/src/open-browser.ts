@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { pickPrimaryRuntimeUrl } from './log-urls.js';
 import { findListeningUrl } from './process-probe.js';
 
 /**
@@ -53,4 +54,49 @@ export async function openBrowserWhenReady(
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   await openBrowser(url);
+}
+
+/**
+ * 优先打开日志探测到的真实地址（适配 Vite 等自动换端口）；
+ * 若超时仍无探测结果，再回退登记 openUrl（若有）。
+ *
+ * @param options.getDetectedUrls - 拉取当前探测 URL
+ * @param options.fallbackUrl - 登记地址
+ * @param options.timeoutMs - 最长等待
+ * @returns {Promise<void>}
+ */
+export async function openBrowserPreferDetected(options: {
+  getDetectedUrls: () => string[];
+  fallbackUrl?: string | null;
+  timeoutMs?: number;
+}): Promise<void> {
+  const { getDetectedUrls, fallbackUrl = null, timeoutMs = 60_000 } = options;
+  const deadline = Date.now() + timeoutMs;
+  let lastPrimary: string | null = null;
+
+  while (Date.now() < deadline) {
+    const detected = getDetectedUrls();
+    const primary = pickPrimaryRuntimeUrl(detected);
+    if (primary) {
+      lastPrimary = primary;
+      const candidates = [primary, fallbackUrl].filter((item): item is string => Boolean(item));
+      const ready = await findListeningUrl(candidates);
+      if (ready) {
+        await openBrowser(ready);
+        return;
+      }
+    } else if (fallbackUrl) {
+      const ready = await findListeningUrl([fallbackUrl]);
+      if (ready) {
+        await openBrowser(ready);
+        return;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  const finalUrl = lastPrimary || pickPrimaryRuntimeUrl(getDetectedUrls()) || fallbackUrl;
+  if (finalUrl) {
+    await openBrowser(finalUrl);
+  }
 }

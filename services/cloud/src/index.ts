@@ -190,8 +190,10 @@ app.get('/v1/auth/me', requireAuth, async (req: AuthedRequest, res) => {
 app.get('/v1/catalog', requireAuth, async (req: AuthedRequest, res) => {
   try {
     const user = (await findUserById(req.user!.id)) ?? req.user!;
+    const catalog = await getCatalog(req.user!.id);
     res.json({
-      projects: await getCatalog(req.user!.id),
+      projects: catalog.projects,
+      categories: catalog.categories,
       projectLimit: user.projectLimit,
     });
   } catch (error) {
@@ -215,8 +217,15 @@ app.put('/v1/catalog', requireAuth, async (req: AuthedRequest, res) => {
       });
       return;
     }
-    const projects = await putCatalog(req.user!.id, parsed.data.projects);
-    res.json({ projects, projectLimit: user.projectLimit });
+    const catalog = await putCatalog(req.user!.id, {
+      projects: parsed.data.projects,
+      categories: parsed.data.categories ?? [],
+    });
+    res.json({
+      projects: catalog.projects,
+      categories: catalog.categories,
+      projectLimit: user.projectLimit,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     res.status(500).json({ error: message });

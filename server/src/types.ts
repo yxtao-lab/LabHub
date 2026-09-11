@@ -36,6 +36,16 @@ export type ProjectPhase = {
   summary: string;
 };
 
+/** 侧栏分组用的项目分类 */
+export type CategoryRecord = {
+  id: string;
+  name: string;
+  /** 展示顺序，越小越靠前 */
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 /** 清单中的项目（落盘到 data/projects.json） */
 export type ProjectRecord = {
   id: string;
@@ -52,6 +62,8 @@ export type ProjectRecord = {
   upstreamUrl: string | null;
   /** 分类标签，如「LLM」「边缘」「工具」 */
   tags: string[];
+  /** 归属分类 id；null 表示未分类 */
+  categoryId: string | null;
   createdAt: string;
   updatedAt: string;
   notes: string;
@@ -115,6 +127,10 @@ export type ProjectView = ProjectRecord & {
   runtimeUrls: string[];
   /** 是否已有 docs/项目分析总结.md */
   hasAnalysis: boolean;
+  /** 依赖是否已安装（无清单时视为 true） */
+  depsInstalled: boolean;
+  /** 是否需要先安装依赖才能启动 / 构建 */
+  needsInstall: boolean;
   startProfiles: StartProfile[];
   buildProfiles: BuildProfile[];
   defaultProfileId: string;

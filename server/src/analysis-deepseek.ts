@@ -87,6 +87,8 @@ ${ANALYSIS_SKILL_OUTPUT_TEMPLATE}
 ## 填写注意
 - 项目显示名优先用登记 name：${record.name}（id=\`${record.id}\`）
 - 分析根可用登记 path：\`${record.path.replace(/\\/g, '/')}\`
+- 「项目概览」必须含「远程仓库」行，优先填：\`${record.repoUrl ?? '未知'}\`
+- 安装/启动/构建/测试命令以证据中的「已识别命令」为准（含 scriptCommands），不要照抄可能过时的 LabHub installCommand
 - 生成日期用今天的 UTC 日期
 - 只输出最终 Markdown 文档正文
 

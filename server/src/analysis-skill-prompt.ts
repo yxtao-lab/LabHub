@@ -27,6 +27,7 @@ export const ANALYSIS_SKILL_SYSTEM_PROMPT = `你是项目分析助手。请对�
 10. 档位：标准（覆盖模板全部适用章节）。
 11. 若项目由 LabHub 托管，在实施步骤中可补充「在 LabHub 控制台登记/启停/看日志」的路径。
 12. 「项目概览」表必须包含「远程仓库」一行：优先用 LabHub 登记的 repoUrl；若无则写 git remote origin；仍无则写「未知」。
+13. 安装/启动/构建/测试命令必须与仓库锁文件及上下文「已识别命令」一致，禁止照抄 LabHub 默认的 npm install / npm run：有 pnpm-lock.yaml、pnpm-workspace.yaml、packageManager=pnpm、或依赖含 workspace: 时用 pnpm install / pnpm run <script>；yarn.lock 用 yarn；bun.lock / bun.lockb 用 bun install / bun run；package-lock.json 才用 npm。Python：uv.lock→uv sync，poetry.lock→poetry install，Pipfile→pipenv install，requirements.txt→python -m pip install -r requirements.txt。脚本表每一条须能从「已识别命令」的 scriptCommands / startProfiles / extraCommands 抄到；登记的 installCommand 若包管理器不一致，以识别结果为准并注明。
 
 ## 分析流程（按序思考，再落笔）
 1. 定位清单：README、包清单、锁文件、容器/CI、配置样例、docs
@@ -59,6 +60,8 @@ export const ANALYSIS_SKILL_OUTPUT_TEMPLATE = `# {项目名称} · 项目分析�
 | 类型 | 如 Web 应用 / API 服务 / 库 / CLI / Monorepo |
 | 主要语言 | |
 | 包管理器 | |
+| 安装依赖 | 按锁文件识别，如 pnpm install / yarn / npm install |
+| 默认启动 | 如 pnpm run dev |
 | 远程仓库 | LabHub 登记的 repoUrl 或 git remote origin（完整 HTTPS/SSH URL） |
 | 当前分支 / 版本线索 | 若可从 git 或 package 得知 |
 | 许可证 | 若有 |

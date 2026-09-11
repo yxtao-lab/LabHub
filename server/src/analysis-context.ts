@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { ProjectRecord } from './types.js';
 import { resolveProjectPath } from './store.js';
+import { resolveAnalysisCommands } from './package-profiles.js';
 
 const SKIP_DIR_NAMES = new Set([
   'node_modules',
@@ -33,13 +34,20 @@ const PRIORITY_FILES = [
   'pnpm-workspace.yaml',
   'pnpm-lock.yaml',
   'package-lock.json',
+  'npm-shrinkwrap.json',
   'yarn.lock',
+  'bun.lock',
+  'bun.lockb',
   'pyproject.toml',
   'requirements.txt',
+  'poetry.lock',
+  'uv.lock',
+  'Pipfile',
   'go.mod',
   'Cargo.toml',
   'pom.xml',
   'composer.json',
+  'Makefile',
   'Dockerfile',
   'docker-compose.yml',
   'docker-compose.yaml',
@@ -238,6 +246,37 @@ export function collectProjectAnalysisContext(record: ProjectRecord): string {
         buildProfiles: record.buildProfiles,
         phases: record.phases,
         currentPhase: record.currentPhase,
+      },
+      null,
+      2,
+    ),
+  );
+
+  const recognized = resolveAnalysisCommands(root, record);
+  push(
+    '已识别命令（以仓库锁文件/清单为准；与 LabHub 登记冲突时以此为准）',
+    JSON.stringify(
+      {
+        kind: recognized.kind,
+        packageManager: recognized.packageManager,
+        installCommand: recognized.installCommand,
+        startCommand: recognized.startCommand,
+        defaultBuildCommand: recognized.defaultBuildCommand,
+        evidence: recognized.evidence,
+        catalogInstallCommand: recognized.catalogInstallCommand,
+        catalogInstallMismatch: recognized.catalogInstallMismatch,
+        scriptCommands: recognized.scriptCommands,
+        extraCommands: recognized.extraCommands,
+        startProfiles: recognized.startProfiles.map((item) => ({
+          id: item.id,
+          name: item.name,
+          command: item.command,
+        })),
+        buildProfiles: recognized.buildProfiles.map((item) => ({
+          id: item.id,
+          name: item.name,
+          command: item.command,
+        })),
       },
       null,
       2,

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import {
   clearAuthState,
   getCloudUrl,
+  getLabhubRepoUrl,
   getUpgradeOffer,
   loadAuthState,
 } from '../auth-store.js';
@@ -31,11 +32,13 @@ export const authRouter = Router();
 authRouter.get('/status', async (_req, res, next) => {
   try {
     const cloudUrl = getCloudUrl();
+    const labhubRepoUrl = getLabhubRepoUrl() || null;
     const upgrade = getUpgradeOffer();
     const local = loadAuthState();
     if (!local || !cloudUrl) {
       res.json({
         cloudUrl: cloudUrl || null,
+        labhubRepoUrl,
         loggedIn: false,
         user: null,
         upgrade,
@@ -44,15 +47,16 @@ authRouter.get('/status', async (_req, res, next) => {
     }
     try {
       const user = await cloudFetchMe();
-      res.json({ cloudUrl, loggedIn: Boolean(user), user, upgrade });
+      res.json({ cloudUrl, labhubRepoUrl, loggedIn: Boolean(user), user, upgrade });
     } catch (error) {
       const status = (error as { status?: number }).status;
       if (status === 401) {
-        res.json({ cloudUrl, loggedIn: false, user: null, upgrade });
+        res.json({ cloudUrl, labhubRepoUrl, loggedIn: false, user: null, upgrade });
         return;
       }
       res.json({
         cloudUrl,
+        labhubRepoUrl,
         loggedIn: true,
         user: {
           id: local.userId,

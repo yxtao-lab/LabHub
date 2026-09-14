@@ -18,36 +18,46 @@ labhub/
   server/                 ← 本机管理 API :8790
   client/                 ← 控制台 UI :5177
   services/cloud/         ← LabHub Cloud（维护者部署：账号/清单/AI）
-  config/public.json      ← 可公开的 cloudUrl（非密钥）
+  config/public.json      ← 可公开的 cloudUrl、labhubRepoUrl（非密钥）
   projects/               ← 托管克隆（gitignore）
   data/                   ← 本机清单与登录态（gitignore）
 ```
 
-## 快速开始（普通用户）
+## 快速开始
+
+**前置**：本机已安装并启动 [Docker Desktop](https://www.docker.com/products/docker-desktop/)（Cloud 依赖 Postgres `:5433`）。
 
 ```bash
 cd E:\Desktop\TYX\AI\labhub
-npm install
-npm run dev
+npm install   # 或 pnpm install
+npm run dev   # 或 pnpm dev
 ```
+
+一条命令会依次：
+
+1. 补全 `services/cloud/.env`（若缺失，从 `.env.example` 复制）
+2. `docker compose` 拉起 Postgres
+3. 并发启动 **server** `:8790`、**client** `:5177`、**cloud** `:8780`
 
 打开 http://127.0.0.1:5177 → **注册/登录**后使用管理功能。
 
+- 开发预置账号：`13800138000` / `labhub123`（`SMS_PROVIDER=dev`）
 - 注册：手机号 + 密码 + 短信验证码（邀请码可选）
 - 登录：手机号 + 密码，或手机号 + 验证码
 - 默认可管理 **3** 个项目；使用他人邀请码注册时，你与邀请人各 **+1**
 
-无需配置 DeepSeek Token。
+无需配置 DeepSeek Token（AI 分析可选，Key 只写在 Cloud `.env`）。
 
-### 维护者：部署 LabHub Cloud
+### 生产部署 LabHub Cloud
+
+本地联调已包含在根目录 `npm run dev`。若单独部署 Cloud 到服务器：
 
 ```bash
 cd services/cloud
 cp .env.example .env
 # 必填：JWT_SECRET、DATABASE_URL
-# 本地库：docker compose up -d（默认 5433 端口，启动时自动建表）
-# 开发：SMS_PROVIDER=dev、SMS_DEV_CODE=123456（验证码打日志）
 # 生产：DEEPSEEK_API_KEY + SMS_PROVIDER=aliyun 及短信密钥
+docker compose up -d
 npm install
 npm run dev   # 默认 :8780
 ```
@@ -61,6 +71,8 @@ npm run dev   # 默认 :8780
 ```
 
 本地联调默认已是 `http://127.0.0.1:8780`。套餐在控制台「套餐」内系统支付开通（免费 / 基础 ¥9.9 / 专业 ¥29；Cloud `PAYMENT_MODE=mock` 为模拟支付）。详见 [`services/cloud/README.md`](services/cloud/README.md)。
+
+> `services/analysis-relay` 为遗留可选服务，默认不随 `npm run dev` 启动（与 Cloud 同占 `:8780`；分析已走 Cloud `/v1/analyze`）。
 
 获客材料（落地页 / 演示脚本 / 发帖文案）见 [`docs/获客/`](docs/获客/)。
 

@@ -6,6 +6,7 @@ import { authRouter } from './routes/auth.js';
 import { billingRouter } from './routes/billing.js';
 import { categoriesRouter } from './routes/categories.js';
 import { projectsRouter } from './routes/projects.js';
+import { workspaceRouter } from './routes/workspace.js';
 import { ROOT_DIR } from './store.js';
 
 /**
@@ -26,6 +27,7 @@ export function createApp() {
   app.use('/api/billing', billingRouter);
   app.use('/api/categories', requireLocalLogin, categoriesRouter);
   app.use('/api/projects', requireLocalLogin, projectsRouter);
+  app.use('/api/workspace', requireLocalLogin, workspaceRouter);
 
   const clientDist = path.join(ROOT_DIR, 'client', 'dist');
   app.use(express.static(clientDist));

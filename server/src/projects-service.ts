@@ -47,6 +47,7 @@ import {
   upsertProject,
 } from './store.js';
 import { normalizeTags } from './tags.js';
+import { syncCursorWorkspaceFile, openCursorWorkspace } from './workspace-sync.js';
 import type {
   BuildProfile,
   LogLine,
@@ -534,6 +535,15 @@ export async function addProject(
   }
   await pushCatalogIfLoggedIn();
   emit({ type: 'status', phase: 'done', message: '登记完成' });
+  syncCursorWorkspaceFile();
+  try {
+    openCursorWorkspace();
+  } catch (error) {
+    console.warn(
+      '[labhub] 自动打开 Cursor 工作区失败（可在控制台点「打开 Git 工作区」）',
+      error instanceof Error ? error.message : error,
+    );
+  }
   return toProjectView(record);
 }
 
@@ -632,6 +642,7 @@ export async function deleteProject(id: string, deleteFiles = false): Promise<vo
     }
   }
   await pushCatalogIfLoggedIn();
+  syncCursorWorkspaceFile();
 }
 
 /**

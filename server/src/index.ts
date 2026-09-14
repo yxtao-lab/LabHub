@@ -6,6 +6,7 @@ import { loadRootEnvFile } from './load-env.js';
 import { ensureComprehensiveProfiles } from './projects-service.js';
 import { clearAllRuntimes } from './runtime-store.js';
 import { ensureDirs, loadProjects } from './store.js';
+import { syncCursorWorkspaceFile } from './workspace-sync.js';
 
 loadRootEnvFile();
 ensureDirs();
@@ -23,6 +24,11 @@ if (cloudUrl) {
 clearAllRuntimes();
 console.log('[labhub] 托管项目默认不自动启动，请在控制台按需启停');
 
+try {
+  syncCursorWorkspaceFile();
+} catch (error) {
+  console.warn('[labhub] 同步 Cursor 工作区文件失败', error);
+}
 try {
   const generatedIds = ensureMissingAnalyses(loadProjects());
   if (generatedIds.length > 0) {

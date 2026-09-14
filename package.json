@@ -5,10 +5,12 @@
   "description": "多仓库项目中枢：按 GitHub 地址拉取、统一启停与运行监控；各项目提交仍推回各自源仓库",
   "workspaces": [
     "server",
-    "client"
+    "client",
+    "services/cloud"
   ],
   "scripts": {
-    "dev": "concurrently --kill-others-on-fail --names server,client \"npm run dev -w server\" \"npm run dev -w client\"",
+    "dev:infra": "node scripts/ensure-cloud-dev.mjs",
+    "dev": "npm run dev:infra && concurrently --kill-others-on-fail --names server,client,cloud \"npm run dev -w server\" \"npm run dev -w client\" \"npm run dev -w @labhub/cloud\"",
     "build": "npm run build -w client && npm run build -w server",
     "start": "npm run start -w server",
     "seed:demo": "npm run seed:demo -w server"

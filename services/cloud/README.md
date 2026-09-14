@@ -3,7 +3,19 @@
 统一云服务：手机号短信登录、托管清单元数据同步、AI 月配额、DeepSeek 分析中继。  
 `DEEPSEEK_API_KEY` 与短信密钥只放在本服务 `.env`，不进入 LabHub 开源仓或用户本机。
 
-## 启动
+## 本地推荐（与控制台一体）
+
+在**仓库根目录**执行即可（会自动补 `.env`、起 Postgres，并并发启动 server / client / cloud）：
+
+```bash
+cd ../..   # 若当前在 services/cloud
+npm install
+npm run dev   # 或 pnpm dev
+```
+
+Cloud 默认 http://127.0.0.1:8780；控制台 http://127.0.0.1:5177。
+
+## 单独启动本服务
 
 ```bash
 cd services/cloud

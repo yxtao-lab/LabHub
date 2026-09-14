@@ -196,6 +196,8 @@ type CloudUser = {
 };
 
 const cloudUrl = ref<string | null>(null);
+/** LabHub 本仓公开 Git 地址 */
+const labhubRepoUrl = ref<string | null>(null);
 const authUser = ref<CloudUser | null>(null);
 const authLoggedIn = ref(false);
 const authReady = ref(false);
@@ -787,10 +789,12 @@ async function refreshAuth(): Promise<void> {
   try {
     const data = await api<{
       cloudUrl: string | null;
+      labhubRepoUrl?: string | null;
       loggedIn: boolean;
       user: CloudUser | null;
     }>('/api/auth/status');
     cloudUrl.value = data.cloudUrl;
+    labhubRepoUrl.value = data.labhubRepoUrl ?? null;
     authLoggedIn.value = data.loggedIn;
     authUser.value = data.user;
   } catch {
@@ -894,6 +898,26 @@ async function submitAuth(): Promise<void> {
     });
     await enterAfterAuth(data.user);
   });
+}
+
+/**
+ * 同步并打开 labhub.code-workspace，使托管仓进入 Cursor 源代码管理。
+ *
+ * @returns {Promise<void>}
+ */
+async function openGitWorkspace(): Promise<void> {
+  busy.value = true;
+  try {
+    const data = await api<{ hint?: string; workspacePath?: string }>(
+      '/api/workspace/open',
+      { method: 'POST', body: '{}' },
+    );
+    showToast(data.hint || `已打开工作区：${data.workspacePath ?? 'labhub.code-workspace'}`);
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    busy.value = false;
+  }
 }
 
 /**
@@ -1015,19 +1039,25 @@ const projectGroups = computed((): ProjectGroup[] => {
 });
 
 /**
- * 卡片上最多展示的标签数量，超出以省略号表示。
+ * 卡片上最多展示的业务标签数量（分支名单独占首位，不计入此限额）。
  */
 const CARD_TAG_LIMIT = 3;
 
 /**
- * 取卡片展示用标签（最多 3 个）及是否还有更多。
+ * 卡片标签行：分支名（若有）+ 业务标签截断。
  *
- * @param tags - 项目标签列表
- * @returns 可见标签与是否省略
+ * @param project - 项目视图
+ * @returns 分支、可见业务标签、是否还有更多
  */
-function cardTags(tags: string[] | undefined): { visible: string[]; hasMore: boolean } {
-  const list = tags ?? [];
+function cardTagRow(project: Project): {
+  branch: string | null;
+  visible: string[];
+  hasMore: boolean;
+} {
+  const branch = (project.git?.branch || project.branch || '').trim() || null;
+  const list = project.tags ?? [];
   return {
+    branch,
     visible: list.slice(0, CARD_TAG_LIMIT),
     hasMore: list.length > CARD_TAG_LIMIT,
   };
@@ -2465,6 +2495,16 @@ watch(logProfileId, () => {
         @submit.prevent="submitAuth"
       >
         <h1 class="text-center text-xl font-semibold tracking-tight">LabHub</h1>
+        <p v-if="labhubRepoUrl" class="mt-1.5 text-center">
+          <a
+            class="mono text-xs text-[var(--accent)] hover:underline"
+            :href="labhubRepoUrl"
+            target="_blank"
+            rel="noopener noreferrer"
+            :title="labhubRepoUrl"
+            @click="onLogLinkClick"
+          >{{ labhubRepoUrl }}</a>
+        </p>
         <p
           v-if="isDevClient"
           class="mt-2 text-center text-xs text-[var(--muted)]"
@@ -2646,9 +2686,20 @@ watch(logProfileId, () => {
       class="flex shrink-0 flex-wrap items-center justify-between gap-4 border-b border-[var(--line)] bg-[var(--panel)]/80 px-5 py-3 backdrop-blur"
     >
       <div class="min-w-0">
-        <div class="flex items-baseline gap-3">
+        <div class="flex flex-wrap items-baseline gap-3">
           <h1 class="text-xl font-semibold tracking-tight">LabHub</h1>
           <p class="hidden text-sm text-[var(--muted)] sm:block">多仓库启停与日志监控</p>
+          <a
+            v-if="labhubRepoUrl"
+            class="mono max-w-[min(100%,28rem)] truncate text-xs text-[var(--accent)] hover:underline"
+            :href="labhubRepoUrl"
+            target="_blank"
+            rel="noopener noreferrer"
+            :title="labhubRepoUrl"
+            @click="onLogLinkClick"
+          >
+            {{ labhubRepoUrl }}
+          </a>
         </div>
       </div>
       <div class="flex flex-wrap items-center gap-2 sm:gap-3">
@@ -2703,6 +2754,15 @@ watch(logProfileId, () => {
             @click="restoreMissing"
           >
             恢复缺失 {{ missingProjects.length }}
+          </button>
+          <button
+            type="button"
+            class="rounded border border-[var(--line)] px-2 py-0.5 text-[var(--muted)] hover:border-[var(--accent)]/40 hover:text-[var(--text)]"
+            :disabled="busy"
+            title="用 Cursor 多根工作区打开，源代码管理才能看到 projects 下托管仓"
+            @click="openGitWorkspace"
+          >
+            打开 Git 工作区
           </button>
           <button
             type="button"
@@ -2919,31 +2979,36 @@ watch(logProfileId, () => {
                         {{ statusLabel(project.runtime.status) }}
                       </span>
                       <span
-                        v-if="project.git?.branch || project.branch"
-                        class="mono rounded border border-[var(--line)] px-1.5 py-0.5 text-[10px] text-[var(--muted)]"
-                        :title="`当前分支 ${(project.git?.branch || project.branch) ?? ''}`"
-                      >
-                        {{ project.git?.branch || project.branch }}
-                      </span>
-                      <span
                         v-if="project.currentPhase"
                         class="rounded border border-[var(--accent)]/35 px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]"
                       >
                         {{ project.currentPhase }}
                       </span>
                     </div>
-                    <div v-if="project.tags?.length" class="mt-1.5 flex flex-wrap items-center gap-1">
+                    <div
+                      v-for="row in [cardTagRow(project)]"
+                      :key="`${project.id}-tags`"
+                      v-show="row.branch || row.visible.length"
+                      class="mt-1.5 flex flex-wrap items-center gap-1"
+                    >
                       <span
-                        v-for="tag in cardTags(project.tags).visible"
+                        v-if="row.branch"
+                        class="mono rounded border border-[var(--accent)]/45 bg-[var(--accent)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]"
+                        :title="`当前分支 ${row.branch}`"
+                      >
+                        {{ row.branch }}
+                      </span>
+                      <span
+                        v-for="tag in row.visible"
                         :key="tag"
                         class="rounded bg-[#0b1016] px-1.5 py-0.5 text-[10px] text-[var(--muted)]"
                       >
                         {{ tag }}
                       </span>
                       <span
-                        v-if="cardTags(project.tags).hasMore"
+                        v-if="row.hasMore"
                         class="rounded bg-[#0b1016] px-1.5 py-0.5 text-[10px] text-[var(--muted)]"
-                        :title="project.tags.join('、')"
+                        :title="(project.tags ?? []).join('、')"
                       >
                         …
                       </span>

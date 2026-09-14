@@ -17,6 +17,7 @@ import {
 } from './store.js';
 import { toProjectView } from './projects-service.js';
 import type { CategoryRecord, ProjectRecord, ProjectView } from './types.js';
+import { syncCursorWorkspaceFile } from './workspace-sync.js';
 
 /**
  * 规范化云端分类项为本机记录。
@@ -165,6 +166,7 @@ export async function restoreProjectFromCatalog(
     absolutePath,
   ) ?? { ...next, branch: cloned.branch };
   upsertProject(withProfiles);
+  syncCursorWorkspaceFile();
   return toProjectView(withProfiles);
 }
 

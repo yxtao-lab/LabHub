@@ -23,6 +23,8 @@ npm run build && npm start
 }
 ```
 
+> 说明：当前推荐使用 **LabHub Cloud**（`services/cloud`，根目录 `npm run / pnpm run dev` 已一体启动）的 `/v1/analyze`。本 analysis-relay 为遗留可选服务，**不会**随根目录 `dev` 启动，且默认端口与 Cloud 冲突（同为 `:8780`）。
+
 该 URL **不是密钥**，可随仓库分发。真正的 `DEEPSEEK_API_KEY` 只留在中继服务器 `.env`。
 
 ## 接口

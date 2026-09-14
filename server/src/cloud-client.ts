@@ -122,10 +122,20 @@ export async function cloudFetch<T>(
     headers.Authorization = `Bearer ${auth}`;
   }
 
-  const response = await fetch(`${base}${pathName}`, {
-    ...init,
-    headers,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${base}${pathName}`, {
+      ...init,
+      headers,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const wrapped = new Error(
+      `无法连接 LabHub Cloud（${base}）：${detail}。请先启动 Cloud（默认 :8780），或暂时退出登录后再添加仓库`,
+    ) as Error & { status?: number; code?: string };
+    wrapped.code = 'CLOUD_UNREACHABLE';
+    throw wrapped;
+  }
   const raw = await response.text();
   let data: (T & { error?: unknown }) | null = null;
   if (raw) {
@@ -253,6 +263,11 @@ export async function cloudVerifySms(
  *
  * @returns 用户或 null
  */
+/**
+ * 拉取当前登录用户；网络不可达时返回 null（不阻断本机登记）。
+ *
+ * @returns 用户信息；未登录或 Cloud 不可达时为 null
+ */
 export async function cloudFetchMe(): Promise<CloudMeUser | null> {
   const token = getAuthToken();
   if (!token) {
@@ -263,8 +278,18 @@ export async function cloudFetchMe(): Promise<CloudMeUser | null> {
     return data.user;
   } catch (error) {
     const status = (error as { status?: number }).status;
+    const code = (error as { code?: string }).code;
     if (status === 401) {
       clearAuthState();
+      throw error;
+    }
+    // Cloud 宕机时勿阻断本机添加/列表；额度校验稍后云端恢复再对齐
+    if (code === 'CLOUD_UNREACHABLE' || status == null) {
+      console.warn(
+        '[labhub] Cloud 暂不可达，跳过账号额度校验',
+        error instanceof Error ? error.message : error,
+      );
+      return null;
     }
     throw error;
   }

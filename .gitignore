@@ -17,3 +17,4 @@ client/dist/
 server/dist/
 services/cloud/data/
 services/analysis-relay/data/
+labhub.code-workspace

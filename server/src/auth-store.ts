@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { DATA_DIR, ensureDirs, ROOT_DIR } from './store.js';
 
 /** 本机登录态文件 */
@@ -42,6 +43,8 @@ const DEFAULT_UPGRADE_OFFER: UpgradeOffer = {
 type PublicConfigFile = {
   cloudUrl?: string;
   analysisRelayUrl?: string;
+  /** LabHub 本仓公开 Git 地址（顶栏展示） */
+  labhubRepoUrl?: string;
   upgrade?: Partial<UpgradeOffer>;
 };
 
@@ -75,6 +78,31 @@ export function getCloudUrl(): string {
   const raw = readPublicConfigFile();
   const url = (raw.cloudUrl || raw.analysisRelayUrl || '').trim();
   return url.replace(/\/$/, '');
+}
+
+/**
+ * 读取 LabHub 本仓公开 Git 地址（供控制台顶栏）。
+ * 优先 config/public.json 的 labhubRepoUrl，其次本机 `git remote get-url origin`。
+ *
+ * @returns HTTPS/SSH URL；无法取得则空串
+ */
+export function getLabhubRepoUrl(): string {
+  const fromConfig = (readPublicConfigFile().labhubRepoUrl || '').trim();
+  if (fromConfig) {
+    return fromConfig;
+  }
+  try {
+    const url = execFileSync('git', ['remote', 'get-url', 'origin'], {
+      cwd: ROOT_DIR,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 3000,
+    })
+      .trim();
+    return url || '';
+  } catch {
+    return '';
+  }
 }
 
 /**

@@ -38,13 +38,68 @@ function toLocalCategory(item: CatalogCategory, index: number): CategoryRecord {
 }
 
 /**
- * 用云端清单覆盖本机 projects.json（path 统一为 projects/<id>）。
- * 覆盖后会按本地 package.json 补全启动/构建模式。
+ * 比较两条记录的更新时间，取较新者。
  *
- * @param catalog - 云端项目与分类
+ * @param left - 左侧
+ * @param right - 右侧
+ * @returns 较新的一侧；时间相同则偏右侧（云端）
+ */
+function pickNewerByUpdatedAt<T extends { updatedAt?: string }>(left: T, right: T): T {
+  const leftMs = Date.parse(left.updatedAt || '') || 0;
+  const rightMs = Date.parse(right.updatedAt || '') || 0;
+  return rightMs >= leftMs ? right : left;
+}
+
+/**
+ * 合并本机与云端清单：按 id 并集，同 id 取 updatedAt 较新的一侧。
+ * 避免「Cloud 宕机时本地新增未能推送，登录后被旧云端清单整表覆盖」。
+ *
+ * @param local - 本机当前清单
+ * @param cloud - 云端清单
+ * @returns 合并后的云端形态载荷
+ */
+export function mergeCatalogPayloads(
+  local: CatalogPayload,
+  cloud: CatalogPayload,
+): CatalogPayload {
+  const categoryMap = new Map<string, CatalogCategory>();
+  for (const item of local.categories ?? []) {
+    categoryMap.set(item.id, item);
+  }
+  for (const item of cloud.categories ?? []) {
+    const prev = categoryMap.get(item.id);
+    categoryMap.set(item.id, prev ? pickNewerByUpdatedAt(prev, item) : item);
+  }
+
+  const projectMap = new Map<string, CatalogProject>();
+  for (const item of local.projects ?? []) {
+    projectMap.set(item.id, item);
+  }
+  for (const item of cloud.projects ?? []) {
+    const prev = projectMap.get(item.id);
+    projectMap.set(item.id, prev ? pickNewerByUpdatedAt(prev, item) : item);
+  }
+
+  const categories = [...categoryMap.values()].sort(
+    (a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0),
+  );
+  const categoryIds = new Set(categories.map((item) => item.id));
+  const projects = [...projectMap.values()].map((item) => ({
+    ...item,
+    categoryId:
+      item.categoryId && categoryIds.has(item.categoryId) ? item.categoryId : null,
+  }));
+
+  return { projects, categories };
+}
+
+/**
+ * 将清单载荷写入本机 projects.json（path 统一为 projects/<id>），并补全启动/构建模式。
+ *
+ * @param catalog - 云端形态的项目与分类
  * @returns 写入后的本机记录
  */
-export async function syncLocalCatalogFromCloud(
+export async function applyCatalogToLocal(
   catalog: CatalogPayload | CatalogProject[],
 ): Promise<ProjectRecord[]> {
   const now = new Date().toISOString();
@@ -89,6 +144,41 @@ export async function syncLocalCatalogFromCloud(
   });
   saveStore({ projects: enriched, categories });
   return enriched;
+}
+
+/**
+ * 用云端清单覆盖本机 projects.json（显式拉取时使用）。
+ *
+ * @param catalog - 云端项目与分类
+ * @returns 写入后的本机记录
+ */
+export async function syncLocalCatalogFromCloud(
+  catalog: CatalogPayload | CatalogProject[],
+): Promise<ProjectRecord[]> {
+  return applyCatalogToLocal(catalog);
+}
+
+/**
+ * 登录/注册后：合并本机与云端清单后写回本机，并尽量推回 Cloud。
+ * 本机独有项目/分类（例如 Cloud 宕机期间新建）不会被旧云端数据抹掉。
+ *
+ * @param cloudCatalog - 刚拉取的云端清单
+ * @returns 合并后的本机项目记录
+ */
+export async function mergeLocalCatalogWithCloud(
+  cloudCatalog: CatalogPayload | CatalogProject[],
+): Promise<ProjectRecord[]> {
+  const cloud: CatalogPayload = Array.isArray(cloudCatalog)
+    ? { projects: cloudCatalog, categories: [] }
+    : {
+        projects: cloudCatalog.projects ?? [],
+        categories: cloudCatalog.categories ?? [],
+      };
+  const local = buildLocalCatalogPayload();
+  const merged = mergeCatalogPayloads(local, cloud);
+  const projects = await applyCatalogToLocal(merged);
+  await pushCatalogIfLoggedIn();
+  return projects;
 }
 
 /**

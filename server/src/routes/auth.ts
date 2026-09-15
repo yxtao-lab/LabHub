@@ -17,6 +17,7 @@ import {
 } from '../cloud-client.js';
 import {
   buildLocalCatalogPayload,
+  mergeLocalCatalogWithCloud,
   restoreProjectFromCatalog,
   syncLocalCatalogFromCloud,
 } from '../catalog-sync.js';
@@ -93,8 +94,8 @@ authRouter.post('/login', async (req, res, next) => {
     const password = String(req.body?.password ?? '');
     const { user } = await cloudLoginPassword(phone, password);
     const catalog = await cloudGetCatalog();
-    await syncLocalCatalogFromCloud(catalog);
-    res.json({ user, registered: false, projectCount: catalog.projects.length });
+    const projects = await mergeLocalCatalogWithCloud(catalog);
+    res.json({ user, registered: false, projectCount: projects.length });
   } catch (error) {
     next(error);
   }
@@ -112,8 +113,8 @@ authRouter.post('/register', async (req, res, next) => {
       typeof req.body?.inviteCode === 'string' ? req.body.inviteCode : undefined;
     const { user } = await cloudRegister({ phone, password, code, inviteCode });
     const catalog = await cloudGetCatalog();
-    await syncLocalCatalogFromCloud(catalog);
-    res.status(201).json({ user, registered: true, projectCount: catalog.projects.length });
+    const projects = await mergeLocalCatalogWithCloud(catalog);
+    res.status(201).json({ user, registered: true, projectCount: projects.length });
   } catch (error) {
     next(error);
   }
@@ -128,8 +129,8 @@ authRouter.post('/sms/verify', async (req, res, next) => {
     const code = String(req.body?.code ?? '');
     const { user } = await cloudVerifySms(phone, code);
     const catalog = await cloudGetCatalog();
-    await syncLocalCatalogFromCloud(catalog);
-    res.json({ user, registered: false, projectCount: catalog.projects.length });
+    const projects = await mergeLocalCatalogWithCloud(catalog);
+    res.json({ user, registered: false, projectCount: projects.length });
   } catch (error) {
     next(error);
   }

@@ -1,4 +1,10 @@
-import type { BuildProfile, ProjectPhase, ProjectRecord, StartProfile } from './types.js';
+import type {
+  BuildProfile,
+  CustomCommand,
+  ProjectPhase,
+  ProjectRecord,
+  StartProfile,
+} from './types.js';
 
 /** 默认启动模式 id（兼容旧清单） */
 export const DEFAULT_PROFILE_ID = 'default';
@@ -8,6 +14,12 @@ export const DEFAULT_BUILD_PROFILE_ID = 'default';
 
 /** 构建运行态键前缀（与启动模式区分） */
 export const BUILD_RUNTIME_PREFIX = '__build__:';
+
+/** 自定义命令运行态键前缀（profile 段） */
+export const CUSTOM_RUNTIME_PREFIX = 'custom:';
+
+/** 自定义命令最大长度 */
+export const MAX_CUSTOM_COMMAND_LENGTH = 2000;
 
 /**
  * 组装进程管理键：同一项目不同启动模式可并行。
@@ -52,6 +64,53 @@ export function parseBuildProfileId(profileId: string): string {
     return profileId;
   }
   return profileId.slice(BUILD_RUNTIME_PREFIX.length) || DEFAULT_BUILD_PROFILE_ID;
+}
+
+/**
+ * 判断运行态键是否为自定义命令。
+ *
+ * @param profileId - 复合键中的 profile 段
+ * @returns 是否自定义命令键
+ */
+export function isCustomRuntimeProfileId(profileId: string): boolean {
+  return profileId.startsWith(CUSTOM_RUNTIME_PREFIX);
+}
+
+/**
+ * 从自定义命令运行态 profile 段解析命令 id。
+ *
+ * @param profileId - 如 `custom:lint`
+ * @returns 自定义命令 id
+ */
+export function parseCustomCommandId(profileId: string): string {
+  if (!isCustomRuntimeProfileId(profileId)) {
+    return profileId;
+  }
+  return profileId.slice(CUSTOM_RUNTIME_PREFIX.length);
+}
+
+/**
+ * 组装自定义命令的运行态 profile 段。
+ *
+ * @param commandId - 自定义命令 id
+ * @returns profile 段，如 `custom:lint`
+ */
+export function customRuntimeProfileId(commandId: string): string {
+  if (isCustomRuntimeProfileId(commandId)) {
+    return commandId;
+  }
+  return `${CUSTOM_RUNTIME_PREFIX}${commandId}`;
+}
+
+/**
+ * 组装自定义命令的完整运行态键。
+ *
+ * @param projectId - 项目 id
+ * @param commandId - 自定义命令 id（可带或不带 custom: 前缀）
+ * @returns 运行态键
+ */
+export function customRuntimeKey(projectId: string, commandId: string): string {
+  return runtimeKey(projectId, customRuntimeProfileId(commandId));
 }
 
 /**
@@ -213,6 +272,47 @@ export function findBuildProfile(
 }
 
 /**
+ * 归一自定义命令列表。
+ *
+ * @param record - 项目记录
+ * @returns 合法的自定义命令数组
+ */
+export function resolveCustomCommands(record: ProjectRecord): CustomCommand[] {
+  if (!Array.isArray(record.customCommands)) {
+    return [];
+  }
+  return record.customCommands
+    .map((item) => ({
+      id: String(item.id || '').trim(),
+      name: String(item.name || item.id || '自定义命令').trim() || '自定义命令',
+      command: String(item.command || '').trim(),
+      cwd: item.cwd ? String(item.cwd).trim() || null : null,
+    }))
+    .filter((item) => item.id && item.command);
+}
+
+/**
+ * 按 id 查找已保存的自定义命令。
+ *
+ * @param commands - 命令列表
+ * @param commandId - 命令 id（可带 custom: 前缀）
+ * @returns 命中的命令
+ * @throws {Error} 找不到时抛出
+ */
+export function findCustomCommand(
+  commands: CustomCommand[],
+  commandId?: string | null,
+): CustomCommand {
+  const raw = commandId || '';
+  const id = isCustomRuntimeProfileId(raw) ? parseCustomCommandId(raw) : raw;
+  const hit = commands.find((item) => item.id === id);
+  if (!hit) {
+    throw new Error(`自定义命令不存在：${commandId ?? '(空)'}`);
+  }
+  return hit;
+}
+
+/**
  * 归一分期列表（缺省为空数组）。
  *
  * @param record - 项目记录
@@ -253,6 +353,7 @@ export function normalizeProjectRecord(record: ProjectRecord): ProjectRecord {
     defaultProfileId,
     buildProfiles,
     defaultBuildProfileId,
+    customCommands: resolveCustomCommands(record),
     phases: resolvePhases(record),
     currentPhase: record.currentPhase ?? null,
     tags: record.tags ?? [],

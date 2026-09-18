@@ -40,6 +40,7 @@ export type CatalogProject = {
   updatedAt: string;
   startProfiles?: ProjectRecord['startProfiles'];
   buildProfiles?: ProjectRecord['buildProfiles'];
+  customCommands?: ProjectRecord['customCommands'];
   defaultProfileId?: string | null;
   defaultBuildProfileId?: string | null;
   phases?: ProjectRecord['phases'];
@@ -89,6 +90,7 @@ export function toCatalogProject(record: ProjectRecord): CatalogProject {
     updatedAt: record.updatedAt,
     startProfiles: record.startProfiles,
     buildProfiles: record.buildProfiles,
+    customCommands: record.customCommands,
     defaultProfileId: record.defaultProfileId,
     defaultBuildProfileId: record.defaultBuildProfileId,
     phases: record.phases,

@@ -132,6 +132,7 @@ export async function applyCatalogToLocal(
       updatedAt: item.updatedAt || now,
       startProfiles: item.startProfiles as ProjectRecord['startProfiles'],
       buildProfiles: item.buildProfiles as ProjectRecord['buildProfiles'],
+      customCommands: item.customCommands as ProjectRecord['customCommands'],
       defaultProfileId: item.defaultProfileId,
       defaultBuildProfileId: item.defaultBuildProfileId,
       phases: item.phases as ProjectRecord['phases'],

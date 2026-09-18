@@ -5,6 +5,7 @@ import {
   api,
   ApiError,
   type Category,
+  type CustomCommandRuntimeView,
   type LogLine,
   type ProfileRuntimeView,
   type Project,
@@ -106,6 +107,9 @@ const selectedId = ref<string | null>(null);
 const logs = ref<LogLine[]>([]);
 const logProfileId = ref<string | null>(null);
 const buildProfileId = ref<string>('');
+const customCommandDraft = ref('');
+const customCwdDraft = ref('');
+const customNameDraft = ref('');
 const error = ref<string | null>(null);
 const busy = ref(false);
 const showAdd = ref(false);
@@ -1329,6 +1333,149 @@ async function buildSelected(profileId?: string | null): Promise<void> {
     });
   });
   void refreshLogs(id);
+}
+
+/**
+ * 在项目目录执行临时自定义命令。
+ *
+ * @returns {Promise<void>}
+ */
+async function runCustomCommandDraft(): Promise<void> {
+  if (!selected.value) {
+    return;
+  }
+  const command = customCommandDraft.value.trim();
+  if (!command) {
+    error.value = '请输入要执行的命令';
+    showToast('请输入命令');
+    return;
+  }
+  const id = selected.value.id;
+  detailTab.value = 'logs';
+  await runAction(async () => {
+    const data = await api<{ project: Project; profileId: string }>(
+      `/api/projects/${id}/run`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          command,
+          cwd: customCwdDraft.value.trim() || null,
+          name: customNameDraft.value.trim() || undefined,
+        }),
+      },
+    );
+    logProfileId.value = data.profileId;
+  });
+  void refreshLogs(id);
+}
+
+/**
+ * 将当前输入保存为可复用自定义命令。
+ *
+ * @returns {Promise<void>}
+ */
+async function saveCustomCommandDraft(): Promise<void> {
+  if (!selected.value) {
+    return;
+  }
+  const command = customCommandDraft.value.trim();
+  if (!command) {
+    error.value = '请输入要保存的命令';
+    showToast('请输入命令');
+    return;
+  }
+  const id = selected.value.id;
+  await runAction(async () => {
+    await api(`/api/projects/${id}/custom-commands`, {
+      method: 'POST',
+      body: JSON.stringify({
+        command,
+        cwd: customCwdDraft.value.trim() || null,
+        name: customNameDraft.value.trim() || undefined,
+      }),
+    });
+    showToast('已保存自定义命令');
+  });
+}
+
+/**
+ * 运行已保存的自定义命令。
+ *
+ * @param commandId - 命令 id
+ * @returns {Promise<void>}
+ */
+async function runSavedCustomCommand(commandId: string): Promise<void> {
+  if (!selected.value) {
+    return;
+  }
+  const id = selected.value.id;
+  const profileId = `custom:${commandId}`;
+  logProfileId.value = profileId;
+  detailTab.value = 'logs';
+  await runAction(async () => {
+    await api(`/api/projects/${id}/run`, {
+      method: 'POST',
+      body: JSON.stringify({ commandId }),
+    });
+  });
+  void refreshLogs(id);
+}
+
+/**
+ * 停止自定义命令进程。
+ *
+ * @param commandId - 命令 id（可带或不带 custom:）
+ * @returns {Promise<void>}
+ */
+async function stopCustomCommand(commandId: string): Promise<void> {
+  if (!selected.value) {
+    return;
+  }
+  const id = selected.value.id;
+  const profileId = commandId.startsWith('custom:')
+    ? commandId
+    : `custom:${commandId}`;
+  logProfileId.value = profileId;
+  await runAction(async () => {
+    await api(`/api/projects/${id}/stop`, {
+      method: 'POST',
+      body: JSON.stringify({ profileId }),
+    });
+  });
+  void refreshLogs(id);
+}
+
+/**
+ * 删除已保存的自定义命令。
+ *
+ * @param commandId - 命令 id
+ * @returns {Promise<void>}
+ */
+async function deleteSavedCustomCommand(commandId: string): Promise<void> {
+  if (!selected.value) {
+    return;
+  }
+  if (!window.confirm('删除这条自定义命令？')) {
+    return;
+  }
+  const id = selected.value.id;
+  await runAction(async () => {
+    await api(`/api/projects/${id}/custom-commands/${encodeURIComponent(commandId)}`, {
+      method: 'DELETE',
+    });
+  });
+}
+
+/**
+ * 判断自定义命令是否在运行中。
+ *
+ * @param item - 运行视图
+ * @returns 是否 running/starting
+ */
+function isCustomCommandRunning(item: CustomCommandRuntimeView): boolean {
+  return (
+    item.runtime.status === 'running' || item.runtime.status === 'starting'
+  );
 }
 
 /**
@@ -3515,6 +3662,135 @@ watch(logProfileId, () => {
                 </div>
               </div>
 
+              <div class="mt-3 space-y-2">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-xs text-[var(--muted)]">自定义命令</span>
+                  <span
+                    class="mono max-w-[60%] truncate text-[11px] text-[var(--muted)]"
+                    :title="selected.absolutePath"
+                  >
+                    cwd {{ selected.absolutePath }}
+                  </span>
+                </div>
+                <div class="rounded-lg border border-[var(--line)] bg-[#0b1016]/70 px-3 py-2 space-y-2">
+                  <input
+                    v-model="customCommandDraft"
+                    type="text"
+                    placeholder="例如 pnpm lint 或 python scripts/sync.py"
+                    class="mono w-full rounded border border-[var(--line)] bg-[#080c12] px-2 py-1.5 text-xs outline-none focus:border-[var(--accent)]"
+                    :disabled="busy || !selected.exists"
+                    @keydown.enter.prevent="runCustomCommandDraft"
+                  />
+                  <div class="flex flex-wrap gap-2">
+                    <input
+                      v-model="customNameDraft"
+                      type="text"
+                      placeholder="名称（保存时可选）"
+                      class="min-w-[8rem] flex-1 rounded border border-[var(--line)] bg-[#080c12] px-2 py-1 text-xs outline-none focus:border-[var(--accent)]"
+                      :disabled="busy || !selected.exists"
+                    />
+                    <input
+                      v-model="customCwdDraft"
+                      type="text"
+                      placeholder="相对子目录（可选，如 packages/web）"
+                      class="mono min-w-[10rem] flex-[1.4] rounded border border-[var(--line)] bg-[#080c12] px-2 py-1 text-xs outline-none focus:border-[var(--accent)]"
+                      :disabled="busy || !selected.exists"
+                    />
+                  </div>
+                  <div class="flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      :disabled="busy || !selected.exists || !customCommandDraft.trim()"
+                      class="rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-40"
+                      :class="toneClass('ok')"
+                      title="在项目目录执行（不保存）"
+                      @click="runCustomCommandDraft"
+                    >
+                      运行
+                    </button>
+                    <button
+                      type="button"
+                      :disabled="busy || !selected.exists || !customCommandDraft.trim()"
+                      class="rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-40"
+                      :class="toneClass()"
+                      title="保存到本项目清单，可重复一键运行"
+                      @click="saveCustomCommandDraft"
+                    >
+                      保存
+                    </button>
+                  </div>
+                </div>
+                <div
+                  v-for="item in selected.customCommandRuntimes || []"
+                  :key="item.command.id"
+                  class="rounded-lg border border-[var(--line)] bg-[#0b1016]/70 px-3 py-2"
+                >
+                  <div class="flex flex-wrap items-start justify-between gap-2">
+                    <div class="min-w-0">
+                      <div class="flex flex-wrap items-center gap-2">
+                        <span class="text-sm font-medium">{{ item.command.name }}</span>
+                        <span
+                          class="rounded px-1.5 py-0.5 text-[10px] font-medium"
+                          :class="statusClass(item.runtime.status)"
+                        >
+                          {{ statusLabel(item.runtime.status) }}
+                        </span>
+                      </div>
+                      <p class="mono mt-1 break-all text-[11px] text-[var(--muted)]">
+                        {{ item.command.command }}
+                        <span v-if="item.command.cwd"> · cwd {{ item.command.cwd }}</span>
+                      </p>
+                    </div>
+                    <div class="flex shrink-0 gap-1.5">
+                      <button
+                        type="button"
+                        class="rounded border px-2 py-1 text-[11px] font-medium"
+                        :class="
+                          logProfileId === `custom:${item.command.id}`
+                            ? 'border-[var(--accent)]/50 text-[var(--accent)]'
+                            : toneClass()
+                        "
+                        @click="
+                          logProfileId = `custom:${item.command.id}`;
+                          detailTab = 'logs';
+                        "
+                      >
+                        日志
+                      </button>
+                      <button
+                        v-if="isCustomCommandRunning(item)"
+                        type="button"
+                        :disabled="busy"
+                        class="rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-40"
+                        :class="toneClass('danger')"
+                        @click="stopCustomCommand(item.command.id)"
+                      >
+                        停止
+                      </button>
+                      <button
+                        v-else
+                        type="button"
+                        :disabled="busy || !selected.exists"
+                        class="rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-40"
+                        :class="toneClass('ok')"
+                        @click="runSavedCustomCommand(item.command.id)"
+                      >
+                        运行
+                      </button>
+                      <button
+                        type="button"
+                        :disabled="busy"
+                        class="rounded border px-2 py-1 text-[11px] font-medium disabled:opacity-40"
+                        :class="toneClass('danger')"
+                        @click="deleteSavedCustomCommand(item.command.id)"
+                      >
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <div class="mt-2 flex flex-wrap items-center gap-2">
                 <span class="text-xs text-[var(--muted)]">项目分类</span>
                 <select
@@ -3622,6 +3898,13 @@ watch(logProfileId, () => {
                     :value="`build:${item.id}`"
                   >
                     构建 · {{ item.name }}
+                  </option>
+                  <option
+                    v-for="item in selected.customCommands || []"
+                    :key="`custom:${item.id}`"
+                    :value="`custom:${item.id}`"
+                  >
+                    自定义 · {{ item.name }}
                   </option>
                 </select>
                 <span class="text-xs text-[var(--muted)]">自动刷新 · 近 300 行 · {{ logLinkTitle }}</span>

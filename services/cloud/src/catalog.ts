@@ -17,6 +17,7 @@ const catalogProjectSchema = z.object({
   updatedAt: z.string(),
   startProfiles: z.array(z.unknown()).optional(),
   buildProfiles: z.array(z.unknown()).optional(),
+  customCommands: z.array(z.unknown()).optional(),
   defaultProfileId: z.string().nullable().optional(),
   defaultBuildProfileId: z.string().nullable().optional(),
   phases: z.array(z.unknown()).optional(),

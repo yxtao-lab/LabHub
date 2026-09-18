@@ -23,13 +23,20 @@ import { openBrowserPreferDetected } from './open-browser.js';
 import { processManager } from './process-manager.js';
 import {
   DEFAULT_PROFILE_ID,
+  MAX_CUSTOM_COMMAND_LENGTH,
   buildRuntimeKey,
+  customRuntimeKey,
+  customRuntimeProfileId,
   findBuildProfile,
+  findCustomCommand,
   findStartProfile,
   isBuildRuntimeProfileId,
+  isCustomRuntimeProfileId,
   normalizeProjectRecord,
   parseBuildProfileId,
+  parseCustomCommandId,
   resolveBuildProfiles,
+  resolveCustomCommands,
   resolveDefaultBuildProfileId,
   resolveDefaultProfileId,
   resolvePhases,
@@ -50,6 +57,8 @@ import { normalizeTags } from './tags.js';
 import { syncCursorWorkspaceFile, openCursorWorkspace } from './workspace-sync.js';
 import type {
   BuildProfile,
+  CustomCommand,
+  CustomCommandRuntimeView,
   LogLine,
   ProfileRuntimeView,
   ProjectRecord,
@@ -96,6 +105,52 @@ const buildProfileSchema = z.object({
   description: z.string().optional(),
 });
 
+const customCommandSchema = z.object({
+  id: z.string().min(1).max(64).optional(),
+  name: z.string().min(1).max(64).optional(),
+  command: z.string().min(1).max(MAX_CUSTOM_COMMAND_LENGTH),
+  cwd: z.string().max(512).nullable().optional(),
+});
+
+/** 清单落盘用的自定义命令（id/name 必填） */
+const customCommandRecordSchema = z.object({
+  id: z.string().min(1).max(64),
+  name: z.string().min(1).max(64),
+  command: z.string().min(1).max(MAX_CUSTOM_COMMAND_LENGTH),
+  cwd: z.string().max(512).nullable().optional(),
+});
+
+export const runCustomCommandSchema = z
+  .object({
+    command: z.string().max(MAX_CUSTOM_COMMAND_LENGTH).optional().default(''),
+    cwd: z.string().max(512).nullable().optional(),
+    name: z.string().min(1).max(64).optional(),
+    /** 已保存命令 id；传入则用清单中的命令覆盖 command/cwd */
+    commandId: z.string().min(1).max(64).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (!value.commandId && !(value.command || '').trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '请提供 command 或 commandId',
+        path: ['command'],
+      });
+    }
+  });
+
+export const addCustomCommandSchema = z.object({
+  id: z.string().min(1).max(64).optional(),
+  name: z.string().min(1).max(64).optional(),
+  command: z.string().min(1).max(MAX_CUSTOM_COMMAND_LENGTH),
+  cwd: z.string().max(512).nullable().optional(),
+});
+
+export const updateCustomCommandSchema = z.object({
+  name: z.string().min(1).max(64).optional(),
+  command: z.string().min(1).max(MAX_CUSTOM_COMMAND_LENGTH).optional(),
+  cwd: z.string().max(512).nullable().optional(),
+});
+
 const phaseSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -122,6 +177,7 @@ export const addProjectSchema = z.object({
   defaultProfileId: z.string().nullable().optional(),
   buildProfiles: z.array(buildProfileSchema).optional(),
   defaultBuildProfileId: z.string().nullable().optional(),
+  customCommands: z.array(customCommandRecordSchema).optional(),
   phases: z.array(phaseSchema).optional(),
   currentPhase: z.string().nullable().optional(),
 });
@@ -140,6 +196,7 @@ export const updateProjectSchema = z.object({
   defaultProfileId: z.string().nullable().optional(),
   buildProfiles: z.array(buildProfileSchema).optional(),
   defaultBuildProfileId: z.string().nullable().optional(),
+  customCommands: z.array(customCommandRecordSchema).optional(),
   phases: z.array(phaseSchema).optional(),
   currentPhase: z.string().nullable().optional(),
 });
@@ -236,8 +293,10 @@ export async function toProjectView(record: ProjectRecord): Promise<ProjectView>
   const defaultProfileId = resolveDefaultProfileId(normalized, startProfiles);
   const buildProfiles = resolveBuildProfiles(normalized);
   const defaultBuildProfileId = resolveDefaultBuildProfileId(normalized, buildProfiles);
+  const customCommands = resolveCustomCommands(normalized);
 
   const profileRuntimes: ProfileRuntimeView[] = [];
+  const customCommandRuntimes: CustomCommandRuntimeView[] = [];
   const allLogs: LogLine[] = [];
 
   for (const profile of startProfiles) {
@@ -250,6 +309,17 @@ export async function toProjectView(record: ProjectRecord): Promise<ProjectView>
       profile,
       runtime: { ...runtime, profileId: profile.id },
       runtimeUrls,
+    });
+    allLogs.push(...recentLogs);
+  }
+
+  for (const command of customCommands) {
+    const key = customRuntimeKey(normalized.id, command.id);
+    const recentLogs = processManager.getLogs(key, 80);
+    const runtime = await processManager.getRuntime(key, []);
+    customCommandRuntimes.push({
+      command,
+      runtime: { ...runtime, profileId: customRuntimeProfileId(command.id) },
     });
     allLogs.push(...recentLogs);
   }
@@ -276,6 +346,7 @@ export async function toProjectView(record: ProjectRecord): Promise<ProjectView>
     git,
     runtime: aggregateRuntime(profileRuntimes),
     profileRuntimes,
+    customCommandRuntimes,
     recentLogs: allLogs.slice(-30),
     runtimeUrls: uniqueUrls,
     hasAnalysis: hasProjectAnalysis(normalized.path),
@@ -285,6 +356,7 @@ export async function toProjectView(record: ProjectRecord): Promise<ProjectView>
     defaultProfileId,
     buildProfiles,
     defaultBuildProfileId,
+    customCommands,
     phases: resolvePhases(normalized),
     currentPhase: normalized.currentPhase ?? null,
   };
@@ -688,10 +760,10 @@ export async function startProject(
 }
 
 /**
- * 停止指定模式；未传 profileId 时停止全部模式。
+ * 停止指定模式；未传 profileId 时停止全部启动模式与自定义命令。
  *
  * @param id - 项目 id
- * @param profileId - 启动模式 id；空则全部停止
+ * @param profileId - 启动模式 id，或 `custom:xxx`；空则全部停止
  * @returns 视图
  */
 export async function stopProject(
@@ -703,6 +775,19 @@ export async function stopProject(
     throw new Error(`项目不存在：${id}`);
   }
   const profiles = resolveStartProfiles(current);
+  const customCommands = resolveCustomCommands(current);
+
+  if (profileId && isCustomRuntimeProfileId(profileId)) {
+    const commandId = parseCustomCommandId(profileId);
+    const key = customRuntimeKey(id, commandId);
+    const runtime = await processManager.getRuntime(key, []);
+    if (runtime.status === 'stopped') {
+      throw new Error(`自定义命令未在运行：${commandId}`);
+    }
+    await processManager.stop(key, []);
+    return toProjectView(current);
+  }
+
   const targets = profileId
     ? [findStartProfile(profiles, profileId)]
     : profiles;
@@ -718,6 +803,19 @@ export async function stopProject(
     await processManager.stop(key, probeUrls);
     stoppedAny = true;
   }
+
+  if (!profileId) {
+    for (const command of customCommands) {
+      const key = customRuntimeKey(id, command.id);
+      const runtime = await processManager.getRuntime(key, []);
+      if (runtime.status === 'stopped') {
+        continue;
+      }
+      await processManager.stop(key, []);
+      stoppedAny = true;
+    }
+  }
+
   if (!stoppedAny && profileId) {
     throw new Error(`启动模式未在运行：${profileId}`);
   }
@@ -802,7 +900,7 @@ export async function buildProject(
  * 读取某模式（或全部）日志。
  *
  * @param id - 项目 id
- * @param profileId - 启动模式 id；或以 `build:` 前缀表示构建目标；空则合并全部
+ * @param profileId - 启动模式 id；或以 `build:` / `custom:` 前缀；空则合并全部
  * @param limit - 条数
  * @returns 日志行
  */
@@ -817,6 +915,7 @@ export function getProjectLogs(
   }
   const startProfiles = resolveStartProfiles(current);
   const buildProfiles = resolveBuildProfiles(current);
+  const customCommands = resolveCustomCommands(current);
 
   if (profileId) {
     if (profileId.startsWith('build:')) {
@@ -828,6 +927,10 @@ export function getProjectLogs(
       const buildId = parseBuildProfileId(profileId);
       const profile = findBuildProfile(buildProfiles, buildId);
       return processManager.getLogs(buildRuntimeKey(id, profile.id), limit);
+    }
+    if (isCustomRuntimeProfileId(profileId)) {
+      const commandId = parseCustomCommandId(profileId);
+      return processManager.getLogs(customRuntimeKey(id, commandId), limit);
     }
     findStartProfile(startProfiles, profileId);
     return processManager.getLogs(runtimeKey(id, profileId), limit);
@@ -850,6 +953,12 @@ export function getProjectLogs(
         text: `[构建:${profile.name}] ${line.text}`,
       })),
     ),
+    ...customCommands.flatMap((command) =>
+      processManager.getLogs(customRuntimeKey(id, command.id), limit).map((line) => ({
+        ...line,
+        text: `[自定义:${command.name}] ${line.text}`,
+      })),
+    ),
   ];
   merged.sort((a, b) => a.ts.localeCompare(b.ts));
   return merged.slice(-limit);
@@ -859,7 +968,7 @@ export function getProjectLogs(
  * 清空某模式（或全部）日志缓冲；不影响进程运行。
  *
  * @param id - 项目 id
- * @param profileId - 启动模式 id；或以 `build:` 前缀表示构建目标；空则清空全部相关缓冲
+ * @param profileId - 启动模式 id；或以 `build:` / `custom:` 前缀；空则清空全部相关缓冲
  * @returns void
  */
 export function clearProjectLogs(
@@ -872,6 +981,7 @@ export function clearProjectLogs(
   }
   const startProfiles = resolveStartProfiles(current);
   const buildProfiles = resolveBuildProfiles(current);
+  const customCommands = resolveCustomCommands(current);
 
   if (profileId) {
     if (profileId.startsWith('build:')) {
@@ -886,6 +996,11 @@ export function clearProjectLogs(
       processManager.clearLogs(buildRuntimeKey(id, profile.id));
       return;
     }
+    if (isCustomRuntimeProfileId(profileId)) {
+      const commandId = parseCustomCommandId(profileId);
+      processManager.clearLogs(customRuntimeKey(id, commandId));
+      return;
+    }
     findStartProfile(startProfiles, profileId);
     processManager.clearLogs(runtimeKey(id, profileId));
     return;
@@ -898,6 +1013,239 @@ export function clearProjectLogs(
   for (const profile of buildProfiles) {
     processManager.clearLogs(buildRuntimeKey(id, profile.id));
   }
+  for (const command of customCommands) {
+    processManager.clearLogs(customRuntimeKey(id, command.id));
+  }
+}
+
+/**
+ * 规范化自定义命令字段（trim / 空 cwd）。
+ *
+ * @param input - 原始命令字段
+ * @returns 规范化后的 command / cwd / name
+ */
+function normalizeCustomCommandFields(input: {
+  command: string;
+  cwd?: string | null;
+  name?: string;
+}): { command: string; cwd: string | null; name: string } {
+  const command = input.command.trim();
+  if (!command) {
+    throw new Error('命令不能为空');
+  }
+  if (command.length > MAX_CUSTOM_COMMAND_LENGTH) {
+    throw new Error(`命令过长（最多 ${MAX_CUSTOM_COMMAND_LENGTH} 字符）`);
+  }
+  const cwdRaw = input.cwd?.trim() || '';
+  if (cwdRaw.includes('..') || path.isAbsolute(cwdRaw)) {
+    throw new Error('工作目录必须是相对项目根的相对路径');
+  }
+  const name = (input.name?.trim() || command).slice(0, 64);
+  return { command, cwd: cwdRaw || null, name };
+}
+
+/**
+ * 为自定义命令分配唯一 id。
+ *
+ * @param preferred - 可选显式 id
+ * @param name - 显示名
+ * @param existing - 已有命令
+ * @returns 唯一 id
+ */
+function allocateCustomCommandId(
+  preferred: string | undefined,
+  name: string,
+  existing: CustomCommand[],
+): string {
+  let base = '';
+  if (preferred?.trim()) {
+    try {
+      base = sanitizeId(preferred);
+    } catch {
+      base = '';
+    }
+  }
+  if (!base) {
+    try {
+      base = sanitizeId(name);
+    } catch {
+      base = '';
+    }
+  }
+  if (!base) {
+    base = `cmd-${Date.now().toString(36)}`;
+  }
+  const taken = new Set(existing.map((item) => item.id));
+  if (!taken.has(base)) {
+    return base;
+  }
+  let index = 2;
+  while (taken.has(`${base}-${index}`)) {
+    index += 1;
+  }
+  return `${base}-${index}`;
+}
+
+/**
+ * 在项目目录下执行自定义命令（可临时或已保存）。
+ *
+ * @param id - 项目 id
+ * @param input - 命令内容或已保存 commandId
+ * @returns 视图与本次运行的 profileId（如 custom:lint）
+ */
+export async function runCustomCommand(
+  id: string,
+  input: z.infer<typeof runCustomCommandSchema>,
+): Promise<{ project: ProjectView; profileId: string }> {
+  const current = findProject(id);
+  if (!current) {
+    throw new Error(`项目不存在：${id}`);
+  }
+  const absolutePath = resolveProjectPath(current.path);
+  if (!fs.existsSync(absolutePath)) {
+    throw new Error(`项目目录不存在：${absolutePath}`);
+  }
+
+  let commandText = input.command;
+  let cwdRel = input.cwd ?? null;
+  let commandId = input.commandId?.trim() || '';
+
+  if (commandId) {
+    const saved = findCustomCommand(resolveCustomCommands(current), commandId);
+    commandText = saved.command;
+    cwdRel = saved.cwd ?? null;
+    commandId = saved.id;
+  } else {
+    const normalized = normalizeCustomCommandFields({
+      command: commandText,
+      cwd: cwdRel,
+      name: input.name,
+    });
+    commandText = normalized.command;
+    cwdRel = normalized.cwd;
+    commandId = `tmp-${Date.now().toString(36)}`;
+  }
+
+  const cwd = resolveProfileCwd(absolutePath, { cwd: cwdRel });
+  const profileId = customRuntimeProfileId(commandId);
+  const key = customRuntimeKey(id, commandId);
+  await processManager.start(key, cwd, commandText, []);
+  return {
+    project: await toProjectView(current),
+    profileId,
+  };
+}
+
+/**
+ * 保存一条自定义命令到项目清单。
+ *
+ * @param id - 项目 id
+ * @param input - 名称 / 命令 / cwd
+ * @returns 更新后视图与新建命令
+ */
+export async function addCustomCommand(
+  id: string,
+  input: z.infer<typeof addCustomCommandSchema>,
+): Promise<{ project: ProjectView; command: CustomCommand }> {
+  const current = findProject(id);
+  if (!current) {
+    throw new Error(`项目不存在：${id}`);
+  }
+  const existing = resolveCustomCommands(current);
+  const fields = normalizeCustomCommandFields(input);
+  const commandId = allocateCustomCommandId(input.id, fields.name, existing);
+  if (existing.some((item) => item.id === commandId)) {
+    throw new Error(`自定义命令 id 已存在：${commandId}`);
+  }
+  const command: CustomCommand = {
+    id: commandId,
+    name: fields.name,
+    command: fields.command,
+    cwd: fields.cwd,
+  };
+  const next = normalizeProjectRecord({
+    ...current,
+    customCommands: [...existing, command],
+    updatedAt: new Date().toISOString(),
+  });
+  upsertProject(next);
+  await pushCatalogIfLoggedIn();
+  return { project: await toProjectView(next), command };
+}
+
+/**
+ * 更新已保存的自定义命令。
+ *
+ * @param id - 项目 id
+ * @param commandId - 命令 id
+ * @param patch - 可更新字段
+ * @returns 更新后视图与命令
+ */
+export async function updateCustomCommand(
+  id: string,
+  commandId: string,
+  patch: z.infer<typeof updateCustomCommandSchema>,
+): Promise<{ project: ProjectView; command: CustomCommand }> {
+  const current = findProject(id);
+  if (!current) {
+    throw new Error(`项目不存在：${id}`);
+  }
+  const existing = resolveCustomCommands(current);
+  const currentCommand = findCustomCommand(existing, commandId);
+  const fields = normalizeCustomCommandFields({
+    command: patch.command ?? currentCommand.command,
+    cwd: patch.cwd !== undefined ? patch.cwd : currentCommand.cwd,
+    name: patch.name ?? currentCommand.name,
+  });
+  const command: CustomCommand = {
+    id: currentCommand.id,
+    name: fields.name,
+    command: fields.command,
+    cwd: fields.cwd,
+  };
+  const next = normalizeProjectRecord({
+    ...current,
+    customCommands: existing.map((item) =>
+      item.id === currentCommand.id ? command : item,
+    ),
+    updatedAt: new Date().toISOString(),
+  });
+  upsertProject(next);
+  await pushCatalogIfLoggedIn();
+  return { project: await toProjectView(next), command };
+}
+
+/**
+ * 删除已保存的自定义命令（若在运行则先停止）。
+ *
+ * @param id - 项目 id
+ * @param commandId - 命令 id
+ * @returns 更新后视图
+ */
+export async function deleteCustomCommand(
+  id: string,
+  commandId: string,
+): Promise<ProjectView> {
+  const current = findProject(id);
+  if (!current) {
+    throw new Error(`项目不存在：${id}`);
+  }
+  const existing = resolveCustomCommands(current);
+  const command = findCustomCommand(existing, commandId);
+  const key = customRuntimeKey(id, command.id);
+  const runtime = await processManager.getRuntime(key, []);
+  if (runtime.status !== 'stopped') {
+    await processManager.stop(key, []);
+  }
+  processManager.clearLogs(key);
+  const next = normalizeProjectRecord({
+    ...current,
+    customCommands: existing.filter((item) => item.id !== command.id),
+    updatedAt: new Date().toISOString(),
+  });
+  upsertProject(next);
+  await pushCatalogIfLoggedIn();
+  return toProjectView(next);
 }
 
 /**

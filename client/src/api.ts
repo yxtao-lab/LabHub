@@ -24,6 +24,13 @@ export type BuildProfile = {
   description?: string;
 };
 
+export type CustomCommand = {
+  id: string;
+  name: string;
+  command: string;
+  cwd?: string | null;
+};
+
 export type ProjectPhase = {
   id: string;
   name: string;
@@ -51,6 +58,19 @@ export type ProfileRuntimeView = {
     profileId?: string | null;
   };
   runtimeUrls: string[];
+};
+
+export type CustomCommandRuntimeView = {
+  command: CustomCommand;
+  runtime: {
+    status: RuntimeStatus;
+    pid: number | null;
+    startedAt: string | null;
+    exitedAt: string | null;
+    exitCode: number | null;
+    error: string | null;
+    profileId?: string | null;
+  };
 };
 
 export type Project = {
@@ -85,8 +105,10 @@ export type Project = {
     profileId?: string | null;
   };
   profileRuntimes: ProfileRuntimeView[];
+  customCommandRuntimes: CustomCommandRuntimeView[];
   startProfiles: StartProfile[];
   buildProfiles: BuildProfile[];
+  customCommands: CustomCommand[];
   defaultProfileId: string;
   defaultBuildProfileId: string;
   phases: ProjectPhase[];

@@ -3,21 +3,28 @@ import { readProjectAnalysis } from '../analysis.js';
 import { ensureMissingAnalyses, generateProjectAnalysis } from '../analysis-generate.js';
 import { listRemoteBranches } from '../git.js';
 import {
+  addCustomCommand,
+  addCustomCommandSchema,
   addProject,
   addProjectSchema,
   buildProject,
   checkoutBranchForProject,
   clearProjectLogs,
+  deleteCustomCommand,
   deleteProject,
   getProjectLogs,
   installProject,
   listBranchesForProject,
   listProjectViews,
+  runCustomCommand,
+  runCustomCommandSchema,
   startProject,
   stopProject,
   syncProfilesFromPackage,
   syncProject,
   toProjectView,
+  updateCustomCommand,
+  updateCustomCommandSchema,
   updateProject,
   updateProjectSchema,
 } from '../projects-service.js';
@@ -258,6 +265,73 @@ projectsRouter.post('/:id/build', async (req, res, next) => {
     const profileId =
       typeof req.body?.profileId === 'string' ? req.body.profileId : null;
     const project = await buildProject(req.params.id, profileId);
+    res.json({ project });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/projects/:id/run — 在项目目录执行自定义命令
+ */
+projectsRouter.post('/:id/run', async (req, res, next) => {
+  try {
+    const parsed = runCustomCommandSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+    const result = await runCustomCommand(req.params.id, parsed.data);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/projects/:id/custom-commands — 保存自定义命令
+ */
+projectsRouter.post('/:id/custom-commands', async (req, res, next) => {
+  try {
+    const parsed = addCustomCommandSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+    const result = await addCustomCommand(req.params.id, parsed.data);
+    res.status(201).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * PATCH /api/projects/:id/custom-commands/:commandId — 更新自定义命令
+ */
+projectsRouter.patch('/:id/custom-commands/:commandId', async (req, res, next) => {
+  try {
+    const parsed = updateCustomCommandSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+    const result = await updateCustomCommand(
+      req.params.id,
+      req.params.commandId,
+      parsed.data,
+    );
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * DELETE /api/projects/:id/custom-commands/:commandId — 删除自定义命令
+ */
+projectsRouter.delete('/:id/custom-commands/:commandId', async (req, res, next) => {
+  try {
+    const project = await deleteCustomCommand(req.params.id, req.params.commandId);
     res.json({ project });
   } catch (error) {
     next(error);

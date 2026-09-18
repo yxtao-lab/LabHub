@@ -28,6 +28,16 @@ export type BuildProfile = {
   description?: string;
 };
 
+/** 用户自定义命令（在项目目录下执行，可保存复用） */
+export type CustomCommand = {
+  id: string;
+  name: string;
+  /** shell 命令，相对 cwd 执行 */
+  command: string;
+  /** 相对项目根的工作目录，空则用项目根 */
+  cwd?: string | null;
+};
+
 /** 项目研发分期 */
 export type ProjectPhase = {
   id: string;
@@ -71,6 +81,8 @@ export type ProjectRecord = {
   startProfiles?: StartProfile[];
   /** 构建目标列表；缺省由 package 管理器合成一条默认 build */
   buildProfiles?: BuildProfile[];
+  /** 用户保存的自定义命令 */
+  customCommands?: CustomCommand[];
   /** 侧栏「启动」使用的默认模式 */
   defaultProfileId?: string | null;
   /** 默认构建目标 id */
@@ -108,6 +120,12 @@ export type ProfileRuntimeView = {
   runtimeUrls: string[];
 };
 
+/** 单个自定义命令的运行视图 */
+export type CustomCommandRuntimeView = {
+  command: CustomCommand;
+  runtime: RuntimeState;
+};
+
 export type ProjectView = ProjectRecord & {
   absolutePath: string;
   exists: boolean;
@@ -122,6 +140,8 @@ export type ProjectView = ProjectRecord & {
   runtime: RuntimeState;
   /** 各启动模式运行态 */
   profileRuntimes: ProfileRuntimeView[];
+  /** 各已保存自定义命令的运行态 */
+  customCommandRuntimes: CustomCommandRuntimeView[];
   recentLogs: LogLine[];
   /** 从近期日志解析出的运行地址 */
   runtimeUrls: string[];
@@ -133,6 +153,7 @@ export type ProjectView = ProjectRecord & {
   needsInstall: boolean;
   startProfiles: StartProfile[];
   buildProfiles: BuildProfile[];
+  customCommands: CustomCommand[];
   defaultProfileId: string;
   defaultBuildProfileId: string;
   phases: ProjectPhase[];

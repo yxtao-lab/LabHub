@@ -7,7 +7,7 @@ import { billingRouter } from './routes/billing.js';
 import { categoriesRouter } from './routes/categories.js';
 import { projectsRouter } from './routes/projects.js';
 import { workspaceRouter } from './routes/workspace.js';
-import { ROOT_DIR } from './store.js';
+import { CLIENT_DIST_DIR, ROOT_DIR } from './store.js';
 
 /**
  * 创建 Express 应用：API + 生产态静态控制台。
@@ -29,7 +29,7 @@ export function createApp() {
   app.use('/api/projects', requireLocalLogin, projectsRouter);
   app.use('/api/workspace', requireLocalLogin, workspaceRouter);
 
-  const clientDist = path.join(ROOT_DIR, 'client', 'dist');
+  const clientDist = CLIENT_DIST_DIR;
   app.use(express.static(clientDist));
   app.get(/^(?!\/api).*/, (_req, res, next) => {
     res.sendFile(path.join(clientDist, 'index.html'), (error) => {

@@ -9,8 +9,8 @@
 
 ```bash
 cd ../..   # 若当前在 services/cloud
-npm install
-npm run dev   # 或 pnpm dev
+pnpm install
+pnpm dev
 ```
 
 Cloud 默认 http://127.0.0.1:8780；控制台 http://127.0.0.1:5177。
@@ -26,8 +26,8 @@ cp .env.example .env
 # 本地 PostgreSQL（自动建库用户；应用启动时自动建表）
 docker compose up -d
 
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 
 默认 http://127.0.0.1:8780  

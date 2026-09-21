@@ -3,22 +3,31 @@
   "private": true,
   "version": "0.1.0",
   "description": "多仓库项目中枢：按 GitHub 地址拉取、统一启停与运行监控；各项目提交仍推回各自源仓库",
-  "workspaces": [
-    "server",
-    "client",
-    "services/cloud"
-  ],
+  "author": "LabHub",
+  "main": "desktop/main.mjs",
+  "packageManager": "pnpm@10.30.1",
   "scripts": {
     "dev:infra": "node scripts/ensure-cloud-dev.mjs",
-    "dev": "npm run dev:infra && concurrently --kill-others-on-fail --names server,client,cloud \"npm run dev -w server\" \"npm run dev -w client\" \"npm run dev -w @labhub/cloud\"",
-    "build": "npm run build -w client && npm run build -w server",
-    "start": "npm run start -w server",
-    "seed:demo": "npm run seed:demo -w server"
+    "dev": "pnpm run dev:infra && concurrently --kill-others-on-fail --names server,client,cloud,electron \"pnpm --filter @labhub/server dev\" \"pnpm --filter @labhub/client dev\" \"pnpm --filter @labhub/cloud dev\" \"pnpm run dev:electron\"",
+    "dev:electron": "electron .",
+    "build": "pnpm --filter @labhub/client build && pnpm --filter @labhub/server build",
+    "package:win": "node scripts/package-electron.mjs",
+    "start": "pnpm --filter @labhub/server start",
+    "seed:demo": "pnpm --filter @labhub/server seed:demo"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2"
+    "concurrently": "^9.1.2",
+    "electron": "^44.4.3",
+    "electron-builder": "^26.15.3"
   },
   "engines": {
     "node": ">=20.18.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "electron-winstaller",
+      "esbuild"
+    ]
   }
 }

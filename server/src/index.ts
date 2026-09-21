@@ -1,8 +1,10 @@
 import { createApp } from './app.js';
+import { isPackagedApp, ROOT_DIR } from './app-paths.js';
 import { ensureMissingAnalyses } from './analysis-generate.js';
 import { getCloudUrl } from './auth-store.js';
 import { getDeepSeekConfig } from './analysis-deepseek.js';
 import { loadRootEnvFile } from './load-env.js';
+import { openBrowser } from './open-browser.js';
 import { ensureComprehensiveProfiles } from './projects-service.js';
 import { clearAllRuntimes } from './runtime-store.js';
 import { ensureDirs, loadProjects } from './store.js';
@@ -44,8 +46,33 @@ void ensureComprehensiveProfiles().catch((error) => {
 
 const port = Number(process.env.PORT ?? 8790);
 const app = createApp();
+const packaged = isPackagedApp();
 
-app.listen(port, () => {
-  console.log(`[labhub] 管理端 API http://127.0.0.1:${port}`);
-  console.log(`[labhub] 开发时控制台请另开 Vite（默认 :5177）`);
-});
+/**
+ * 监听就绪后的日志。
+ * Electron 自己开窗口，不再调用系统浏览器。
+ *
+ * @returns {void}
+ */
+function onServerReady() {
+  const consoleUrl = `http://127.0.0.1:${port}`;
+  console.log(`[labhub] 管理端 API ${consoleUrl}`);
+  if (process.env.LABHUB_ELECTRON === '1') {
+    if (packaged) {
+      console.log(`[labhub] 数据与仓库目录 ${ROOT_DIR}`);
+    }
+    return;
+  }
+  if (packaged) {
+    console.log(`[labhub] 数据与仓库目录 ${ROOT_DIR}`);
+    void openBrowser(consoleUrl);
+    return;
+  }
+  console.log('[labhub] 开发时控制台请另开 Vite（默认 :5177）');
+}
+
+if (packaged) {
+  app.listen(port, '127.0.0.1', onServerReady);
+} else {
+  app.listen(port, onServerReady);
+}

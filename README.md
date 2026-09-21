@@ -29,17 +29,18 @@ labhub/
 
 ```bash
 cd E:\Desktop\TYX\AI\labhub
-npm install   # 或 pnpm install
-npm run dev   # 或 pnpm dev
+corepack prepare pnpm@10.30.1 --activate
+pnpm install
+pnpm dev
 ```
 
 一条命令会依次：
 
 1. 补全 `services/cloud/.env`（若缺失，从 `.env.example` 复制）
 2. `docker compose` 拉起 Postgres
-3. 并发启动 **server** `:8790`、**client** `:5177`、**cloud** `:8780`
+3. 并发启动 **server** `:8790`、**client** `:5177`、**cloud** `:8780`，并打开 **Electron** 窗口
 
-打开 http://127.0.0.1:5177 → **注册/登录**后使用管理功能。
+开发时控制台在 Electron 里打开（页面由 Vite `:5177` 提供，接口仍是 `:8790`）。也可以直接用浏览器打开 http://127.0.0.1:5177 。
 
 - 开发预置账号：`13800138000` / `labhub123`（`SMS_PROVIDER=dev`）
 - 注册：手机号 + 密码 + 短信验证码（邀请码可选）
@@ -50,7 +51,7 @@ npm run dev   # 或 pnpm dev
 
 ### 生产部署 LabHub Cloud
 
-本地联调已包含在根目录 `npm run dev`。若单独部署 Cloud 到服务器：
+本地联调已包含在根目录 `pnpm dev`。若单独部署 Cloud 到服务器：
 
 ```bash
 cd services/cloud
@@ -58,8 +59,8 @@ cp .env.example .env
 # 必填：JWT_SECRET、DATABASE_URL
 # 生产：DEEPSEEK_API_KEY + SMS_PROVIDER=aliyun 及短信密钥
 docker compose up -d
-npm install
-npm run dev   # 默认 :8780
+pnpm install
+pnpm dev   # 默认 :8780
 ```
 
 把 Cloud 公网地址写入仓库根 [`config/public.json`](config/public.json)：
@@ -72,7 +73,17 @@ npm run dev   # 默认 :8780
 
 本地联调默认已是 `http://127.0.0.1:8780`。套餐在控制台「套餐」内系统支付开通（免费 / 基础 ¥9.9 / 专业 ¥29；Cloud `PAYMENT_MODE=mock` 为模拟支付）。详见 [`services/cloud/README.md`](services/cloud/README.md)。
 
-> `services/analysis-relay` 为遗留可选服务，默认不随 `npm run dev` 启动（与 Cloud 同占 `:8780`；分析已走 Cloud `/v1/analyze`）。
+### 打 Windows 安装包（Electron，不含源码、不含 Cloud）
+
+发给用户的是 Electron 安装包，不是这个仓库。Cloud 继续只部署在你的服务器上。
+
+1. 把 [`config/public.json`](config/public.json) 的 `cloudUrl` 改成正式 Cloud 地址（不要用 `127.0.0.1`）。
+2. 在仓库根目录执行 `pnpm package:win`。
+3. 安装包在 `release/electron/LabHub-Setup-0.1.0.exe`。
+
+安装后双击 LabHub，在应用窗口里登录。清单和浅克隆仓库在 `%LOCALAPPDATA%\LabHub`（`data` 与 `projects`），卸载程序不会删这些文件。用户电脑需要已安装 Git。
+
+> `services/analysis-relay` 为遗留可选服务，默认不随 `pnpm dev` 启动（与 Cloud 同占 `:8780`；分析已走 Cloud `/v1/analyze`）。
 
 获客材料（落地页 / 演示脚本 / 发帖文案）见 [`docs/获客/`](docs/获客/)。
 

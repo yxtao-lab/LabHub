@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { PUBLIC_CONFIG_PATH } from './app-paths.js';
 import { DATA_DIR, ensureDirs, ROOT_DIR } from './store.js';
 
 /** 本机登录态文件 */
@@ -55,7 +56,7 @@ type PublicConfigFile = {
  */
 function readPublicConfigFile(): PublicConfigFile {
   try {
-    const configPath = path.join(ROOT_DIR, 'config', 'public.json');
+    const configPath = PUBLIC_CONFIG_PATH;
     if (!fs.existsSync(configPath)) {
       return {};
     }

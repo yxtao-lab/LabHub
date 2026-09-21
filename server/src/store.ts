@@ -1,14 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { APP_ROOT, CLIENT_DIST_DIR, PUBLIC_CONFIG_PATH, ROOT_DIR, isPackagedApp } from './app-paths.js';
 import { normalizeProjectRecord } from './profiles.js';
 import type { CategoryRecord, ProjectRecord } from './types.js';
 import { normalizeTags } from './tags.js';
 
-const serverDir = path.dirname(fileURLToPath(import.meta.url));
-
-/** labhub 仓库根目录 */
-export const ROOT_DIR = path.resolve(serverDir, '../..');
+export { APP_ROOT, CLIENT_DIST_DIR, PUBLIC_CONFIG_PATH, ROOT_DIR, isPackagedApp };
 
 /** 托管项目默认落地目录 */
 export const PROJECTS_DIR = path.join(ROOT_DIR, 'projects');

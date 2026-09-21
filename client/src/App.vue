@@ -228,7 +228,7 @@ const analysis = ref<ProjectAnalysis | null>(null);
 const analysisLoading = ref(false);
 const analysisHtml = ref('');
 
-const SIDEBAR_MIN_WIDTH = 260;
+const SIDEBAR_MIN_WIDTH = 320;
 const SIDEBAR_MAX_WIDTH = 560;
 const SIDEBAR_DEFAULT_WIDTH = 360;
 const SIDEBAR_COLLAPSED_WIDTH = 52;

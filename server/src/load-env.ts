@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT_DIR } from './store.js';
+import { ROOT_DIR } from './app-paths.js';
 
 /**
  * 从 LabHub 根目录加载 .env 到 process.env（不覆盖已有环境变量）。

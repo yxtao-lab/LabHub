@@ -35,6 +35,16 @@ pnpm dev
 
 将公网根地址写入 LabHub 仓库 `config/public.json` 的 `cloudUrl`（可公开）。
 
+## 服务器发布
+
+在仓库根目录执行（需已安装 Docker 与 PM2）。会安装依赖、编译、拉起 Postgres，并重启 PM2 进程 `labhub-cloud`。改代码或改 `.env` 后再执行一次即可生效：
+
+```bash
+pnpm release
+```
+
+开机自启只需在服务器上做一次：`pm2 startup`，然后 `pm2 save`（`pnpm release` 已会执行 `pm2 save`）。
+
 ## 主要接口
 
 | 方法 | 路径 | 说明 |

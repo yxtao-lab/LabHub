@@ -58,9 +58,12 @@ cd services/cloud
 cp .env.example .env
 # 必填：JWT_SECRET、DATABASE_URL
 # 生产：DEEPSEEK_API_KEY + SMS_PROVIDER=aliyun 及短信密钥
-docker compose up -d
-pnpm install
-pnpm dev   # 默认 :8780
+```
+
+在仓库根目录执行（需已安装 Docker 与 PM2）。代码或 `services/cloud/.env` 有变动时再跑一次即可：
+
+```bash
+pnpm release
 ```
 
 把 Cloud 公网地址写入仓库根 [`config/public.json`](config/public.json)：

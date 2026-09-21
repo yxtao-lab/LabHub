@@ -12,6 +12,7 @@
     "dev:electron": "electron .",
     "build": "pnpm --filter @labhub/client build && pnpm --filter @labhub/server build",
     "package:win": "node scripts/package-electron.mjs",
+    "release": "node scripts/release-cloud.mjs",
     "start": "pnpm --filter @labhub/server start",
     "seed:demo": "pnpm --filter @labhub/server seed:demo"
   },

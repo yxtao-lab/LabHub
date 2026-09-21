@@ -200,8 +200,6 @@ type CloudUser = {
 };
 
 const cloudUrl = ref<string | null>(null);
-/** LabHub 本仓公开 Git 地址 */
-const labhubRepoUrl = ref<string | null>(null);
 const authUser = ref<CloudUser | null>(null);
 const authLoggedIn = ref(false);
 const authReady = ref(false);
@@ -793,12 +791,10 @@ async function refreshAuth(): Promise<void> {
   try {
     const data = await api<{
       cloudUrl: string | null;
-      labhubRepoUrl?: string | null;
       loggedIn: boolean;
       user: CloudUser | null;
     }>('/api/auth/status');
     cloudUrl.value = data.cloudUrl;
-    labhubRepoUrl.value = data.labhubRepoUrl ?? null;
     authLoggedIn.value = data.loggedIn;
     authUser.value = data.user;
   } catch {
@@ -2641,17 +2637,7 @@ watch(logProfileId, () => {
         class="w-full max-w-md rounded-xl border border-[var(--line)] bg-[var(--panel)] p-6 shadow-2xl"
         @submit.prevent="submitAuth"
       >
-        <h1 class="text-center text-xl font-semibold tracking-tight">LabHub</h1>
-        <p v-if="labhubRepoUrl" class="mt-1.5 text-center">
-          <a
-            class="mono text-xs text-[var(--accent)] hover:underline"
-            :href="labhubRepoUrl"
-            target="_blank"
-            rel="noopener noreferrer"
-            :title="labhubRepoUrl"
-            @click="onLogLinkClick"
-          >{{ labhubRepoUrl }}</a>
-        </p>
+        <h1 class="text-center text-3xl font-semibold tracking-tight">LabHub</h1>
         <p
           v-if="isDevClient"
           class="mt-2 text-center text-xs text-[var(--muted)]"
@@ -2834,19 +2820,8 @@ watch(logProfileId, () => {
     >
       <div class="min-w-0">
         <div class="flex flex-wrap items-baseline gap-3">
-          <h1 class="text-xl font-semibold tracking-tight">LabHub</h1>
+          <h1 class="text-2xl font-semibold tracking-tight">LabHub</h1>
           <p class="hidden text-sm text-[var(--muted)] sm:block">多仓库启停与日志监控</p>
-          <a
-            v-if="labhubRepoUrl"
-            class="mono max-w-[min(100%,28rem)] truncate text-xs text-[var(--accent)] hover:underline"
-            :href="labhubRepoUrl"
-            target="_blank"
-            rel="noopener noreferrer"
-            :title="labhubRepoUrl"
-            @click="onLogLinkClick"
-          >
-            {{ labhubRepoUrl }}
-          </a>
         </div>
       </div>
       <div class="flex flex-wrap items-center gap-2 sm:gap-3">

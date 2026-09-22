@@ -9,6 +9,9 @@ import { fileURLToPath } from 'node:url';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const serverOut = path.join(rootDir, 'release', 'app-resources', 'server');
+const electronOutDir = path.join(rootDir, 'release', 'electron');
+const winUnpackedDir = path.join(electronOutDir, 'win-unpacked');
+const winUnpackedTmpDir = path.join(electronOutDir, 'win-unpacked.tmp');
 const assistedInstallerPatch = path.join(rootDir, 'build', 'nsis', 'assistedInstaller.nsh');
 const assistedInstallerTarget = path.join(
   rootDir,
@@ -67,6 +70,119 @@ function applyNsisDirectoryPatch() {
 }
 
 /**
+ * 结束可能锁住 win-unpacked 的进程（LabHub / 本仓库 release 下的 electron / app-builder）。
+ * 不会按进程名杀掉所有 Electron，避免误杀 Cursor。
+ *
+ * @returns {void}
+ */
+function killPackagingLockers() {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const marker = path.resolve(electronOutDir).replace(/\\/g, '\\\\').toLowerCase();
+  const rootMarker = path.resolve(rootDir).replace(/\\/g, '\\\\').toLowerCase();
+  const script = `
+$ErrorActionPreference = 'SilentlyContinue'
+$marker = '${marker}'
+$rootMarker = '${rootMarker}'
+$killed = @()
+Get-CimInstance Win32_Process | ForEach-Object {
+  $name = $_.Name
+  $pathText = (($_.ExecutablePath + ' ' + $_.CommandLine) + '').ToLower().Replace('/', '\\')
+  $isLabHub = $name -eq 'LabHub.exe'
+  $isAppBuilder = $name -eq 'app-builder.exe' -and $pathText.Contains($rootMarker)
+  $isReleaseElectron = ($name -eq 'electron.exe') -and $pathText.Contains($marker)
+  if ($isLabHub -or $isAppBuilder -or $isReleaseElectron) {
+    try {
+      Stop-Process -Id $_.ProcessId -Force
+      $killed += ("$name($($_.ProcessId))")
+    } catch {}
+  }
+}
+if ($killed.Count -gt 0) {
+  Write-Output ('killed:' + ($killed -join ','))
+} else {
+  Write-Output 'killed:none'
+}
+`;
+  const result = spawnSync(
+    'powershell.exe',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+    {
+      cwd: rootDir,
+      encoding: 'utf8',
+      windowsHide: true,
+    },
+  );
+  const output = `${result.stdout || ''}${result.stderr || ''}`.trim();
+  if (output) {
+    log(output.startsWith('killed:') ? `已结束占用进程：${output.slice('killed:'.length)}` : output);
+  }
+  spawnSync('powershell.exe', ['-NoProfile', '-Command', 'Start-Sleep -Milliseconds 1200'], {
+    windowsHide: true,
+  });
+}
+
+/**
+ * 删除目录；若被占用则重试，仍失败则改名挪走，避免挡住本次打包。
+ *
+ * @param targetDir - 要清理的目录
+ * @returns {void}
+ * @throws {Error} 删除与改名都失败时抛出
+ */
+function removeDirForce(targetDir) {
+  if (!fs.existsSync(targetDir)) {
+    return;
+  }
+  const rel = path.relative(rootDir, targetDir);
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    try {
+      fs.rmSync(targetDir, { recursive: true, force: true });
+      if (!fs.existsSync(targetDir)) {
+        log(`已清理 ${rel}`);
+        return;
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      log(`清理 ${rel} 第 ${attempt} 次失败：${detail}`);
+    }
+    spawnSync(
+      'powershell.exe',
+      ['-NoProfile', '-Command', `Start-Sleep -Milliseconds ${400 * attempt}`],
+      { windowsHide: true },
+    );
+    killPackagingLockers();
+  }
+
+  const trashDir = `${targetDir}.trash-${Date.now()}`;
+  try {
+    fs.renameSync(targetDir, trashDir);
+    log(`无法直接删除 ${rel}，已改名为 ${path.basename(trashDir)}（可稍后手动删）`);
+    // 后台尽量删掉，失败忽略
+    try {
+      fs.rmSync(trashDir, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `无法清理 ${rel}（${detail}）。请关闭打开该目录的资源管理器，或暂时排除杀毒对 release\\electron 的实时扫描后重试。`,
+    );
+  }
+}
+
+/**
+ * 删除上次打包残留的解压目录，避免 rename/unlink EPERM、EBUSY。
+ *
+ * @returns {void}
+ */
+function clearUnpackedDirs() {
+  removeDirForce(winUnpackedDir);
+  removeDirForce(winUnpackedTmpDir);
+}
+
+/**
  * 打包入口。
  *
  * @returns {void}
@@ -95,6 +211,10 @@ function main() {
   }
 
   applyNsisDirectoryPatch();
+
+  log('结束可能占用安装产物的进程，并清理 win-unpacked');
+  killPackagingLockers();
+  clearUnpackedDirs();
 
   log('生成 Electron 安装包');
   run('pnpm', [

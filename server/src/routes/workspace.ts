@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { PROJECTS_DIR } from '../store.js';
 import {
   getWorkspaceFilePath,
   openCursorWorkspace,
@@ -33,6 +34,13 @@ workspaceRouter.post('/open', (_req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+/**
+ * GET /api/workspace/projects-dir — 默认托管目录（恢复缺失的默认父路径）
+ */
+workspaceRouter.get('/projects-dir', (_req, res) => {
+  res.json({ projectsDir: PROJECTS_DIR });
 });
 
 /**

@@ -14,7 +14,7 @@ import {
 } from './api';
 import { splitLogTextWithUrls, type LogTextPart } from './log-links';
 
-type DetailTab = 'logs' | 'analysis';
+type DetailTab = 'logs' | 'analysis' | 'repo';
 type UpgradeReason = 'project' | 'ai' | 'general';
 type BillingCycle = 'monthly' | 'yearly';
 type LegalDocKind = 'terms' | 'privacy';
@@ -156,6 +156,21 @@ const contextBranchesLoading = ref(false);
 const contextBranchesError = ref<string | null>(null);
 const showUpgrade = ref(false);
 const showPasswordModal = ref(false);
+const showAccountMenu = ref(false);
+const showRestoreModal = ref(false);
+const restoreSelectedIds = ref<string[]>([]);
+const restoreBaseDir = ref('');
+const restoreDefaultDir = ref('');
+const restoreBusy = ref(false);
+const restoreRows = ref<
+  Array<{
+    id: string;
+    name: string;
+    repoUrl: string;
+    status: 'pending' | 'running' | 'done' | 'error' | 'skipped';
+    message: string;
+  }>
+>([]);
 const passwordOld = ref('');
 const passwordNew = ref('');
 const passwordNew2 = ref('');
@@ -228,6 +243,7 @@ const categoryIdDraft = ref('');
 const nameFilterId = ref('');
 const logPanel = ref<HTMLElement | null>(null);
 const detailTab = ref<DetailTab>('logs');
+const repoMenuOpen = ref(false);
 const analysis = ref<ProjectAnalysis | null>(null);
 const analysisLoading = ref(false);
 const analysisHtml = ref('');
@@ -538,6 +554,16 @@ async function copyText(text: string): Promise<boolean> {
 }
 
 /**
+ * 打开/关闭账户管理菜单。
+ *
+ * @param open - 指定开或关；不传则切换
+ * @returns {void}
+ */
+function setAccountMenuOpen(open?: boolean): void {
+  showAccountMenu.value = open === undefined ? !showAccountMenu.value : open;
+}
+
+/**
  * 复制当前用户邀请码。
  *
  * @returns {Promise<void>}
@@ -550,6 +576,7 @@ async function copyInviteCode(): Promise<void> {
   }
   const ok = await copyText(code);
   showToast(ok ? `邀请码已复制：${code}` : '复制失败，请手动选择');
+  showAccountMenu.value = false;
 }
 
 /**
@@ -593,6 +620,7 @@ function openUpgrade(reason: UpgradeReason = 'general'): void {
   billingMessage.value = null;
   showUpgrade.value = true;
   showAdd.value = false;
+  showAccountMenu.value = false;
   if (reason === 'ai') {
     selectedPlanId.value = 'ai_pack';
   } else if (authUser.value?.planId && authUser.value.planId !== 'free') {
@@ -941,6 +969,7 @@ async function logout(): Promise<void> {
     authMode.value = 'login';
     loginMethod.value = 'password';
     showPasswordModal.value = false;
+    showAccountMenu.value = false;
     passwordOld.value = '';
     passwordNew.value = '';
     passwordNew2.value = '';
@@ -973,6 +1002,7 @@ function openPasswordModal(): void {
   passwordNew.value = '';
   passwordNew2.value = '';
   passwordError.value = null;
+  showAccountMenu.value = false;
   showPasswordModal.value = true;
 }
 
@@ -1019,21 +1049,160 @@ async function submitChangePassword(): Promise<void> {
 }
 
 /**
- * 批量恢复本地缺失的托管目录。
+ * 打开恢复缺失弹窗，默认全选并加载默认目录。
  *
  * @returns {Promise<void>}
  */
-async function restoreMissing(): Promise<void> {
-  await runAction(async () => {
-    const data = await api<{ restored: string[]; failed: Array<{ id: string; error: string }> }>(
-      '/api/auth/restore-missing',
-      { method: 'POST', body: '{}' },
-    );
-    await refresh();
-    if (data.failed.length > 0) {
-      error.value = `部分恢复失败：${data.failed.map((item) => `${item.id}(${item.error})`).join('；')}`;
+async function openRestoreModal(): Promise<void> {
+  const missing = missingProjects.value;
+  if (missing.length === 0) {
+    showToast('没有需要恢复的项目');
+    return;
+  }
+  restoreSelectedIds.value = missing.map((item) => item.id);
+  restoreRows.value = missing.map((item) => ({
+    id: item.id,
+    name: item.name,
+    repoUrl: item.repoUrl,
+    status: 'pending',
+    message: '等待开始',
+  }));
+  restoreBusy.value = false;
+  try {
+    const data = await api<{ projectsDir: string }>('/api/workspace/projects-dir');
+    restoreDefaultDir.value = data.projectsDir;
+    if (!restoreBaseDir.value.trim()) {
+      restoreBaseDir.value = data.projectsDir;
     }
-  });
+  } catch {
+    restoreDefaultDir.value = '';
+  }
+  showRestoreModal.value = true;
+}
+
+/**
+ * 全选 / 取消全选缺失项目。
+ *
+ * @param checked - 是否全选
+ * @returns {void}
+ */
+function setRestoreSelectAll(checked: boolean): void {
+  restoreSelectedIds.value = checked ? missingProjects.value.map((item) => item.id) : [];
+}
+
+/**
+ * 切换单个项目勾选。
+ *
+ * @param id - 项目 id
+ * @param checked - 是否选中
+ * @returns {void}
+ */
+function setRestoreItemChecked(id: string, checked: boolean): void {
+  if (checked) {
+    if (!restoreSelectedIds.value.includes(id)) {
+      restoreSelectedIds.value = [...restoreSelectedIds.value, id];
+    }
+    return;
+  }
+  restoreSelectedIds.value = restoreSelectedIds.value.filter((item) => item !== id);
+}
+
+/**
+ * 选择恢复父目录（Electron 弹窗；浏览器仅提示手输）。
+ *
+ * @returns {Promise<void>}
+ */
+async function pickRestoreBaseDir(): Promise<void> {
+  const desktop = (
+    window as Window & {
+      labhubDesktop?: { selectDirectory?: () => Promise<string | null> };
+    }
+  ).labhubDesktop;
+  if (desktop?.selectDirectory) {
+    const selected = await desktop.selectDirectory();
+    if (selected) {
+      restoreBaseDir.value = selected;
+    }
+    return;
+  }
+  showToast('当前环境请直接粘贴或输入恢复目录路径');
+}
+
+/**
+ * 使用默认托管目录。
+ *
+ * @returns {void}
+ */
+function useDefaultRestoreDir(): void {
+  if (restoreDefaultDir.value) {
+    restoreBaseDir.value = restoreDefaultDir.value;
+  }
+}
+
+/**
+ * 按勾选列表逐个恢复，并更新每行进度。
+ *
+ * @returns {Promise<void>}
+ */
+async function startRestoreSelected(): Promise<void> {
+  const ids = [...restoreSelectedIds.value];
+  if (ids.length === 0) {
+    showToast('请至少选择一个项目');
+    return;
+  }
+  const baseDir = restoreBaseDir.value.trim();
+  if (!baseDir) {
+    showToast('请填写恢复位置');
+    return;
+  }
+  restoreBusy.value = true;
+  const useDefault =
+    Boolean(restoreDefaultDir.value) &&
+    baseDir.replace(/[\\/]+$/, '').toLowerCase() ===
+      restoreDefaultDir.value.replace(/[\\/]+$/, '').toLowerCase();
+  const targetBaseDir = useDefault ? undefined : baseDir;
+
+  for (const id of ids) {
+    const row = restoreRows.value.find((item) => item.id === id);
+    if (row) {
+      row.status = 'running';
+      row.message = '正在克隆…';
+    }
+    try {
+      await api(`/api/auth/restore/${encodeURIComponent(id)}`, {
+        method: 'POST',
+        body: JSON.stringify({
+          targetBaseDir: targetBaseDir || undefined,
+        }),
+      });
+      if (row) {
+        row.status = 'done';
+        row.message = '已恢复';
+      }
+    } catch (err) {
+      if (row) {
+        row.status = 'error';
+        row.message = err instanceof Error ? err.message : String(err);
+      }
+    }
+  }
+
+  for (const row of restoreRows.value) {
+    if (!ids.includes(row.id) && row.status === 'pending') {
+      row.status = 'skipped';
+      row.message = '未选择';
+    }
+  }
+
+  await refresh();
+  restoreBusy.value = false;
+  const failed = restoreRows.value.filter((item) => item.status === 'error');
+  const done = restoreRows.value.filter((item) => item.status === 'done');
+  if (failed.length === 0 && done.length > 0) {
+    showToast(`已恢复 ${done.length} 个项目`);
+  } else if (failed.length > 0) {
+    error.value = `部分恢复失败：${failed.map((item) => `${item.name}(${item.message})`).join('；')}`;
+  }
 }
 
 /**
@@ -1043,10 +1212,26 @@ async function restoreMissing(): Promise<void> {
  * @returns {Promise<void>}
  */
 async function restoreOne(id: string): Promise<void> {
-  await runAction(async () => {
-    await api(`/api/auth/restore/${id}`, { method: 'POST', body: '{}' });
-    await refresh();
-  });
+  restoreSelectedIds.value = [id];
+  restoreRows.value = missingProjects.value
+    .filter((item) => item.id === id)
+    .map((item) => ({
+      id: item.id,
+      name: item.name,
+      repoUrl: item.repoUrl,
+      status: 'pending' as const,
+      message: '等待开始',
+    }));
+  try {
+    const data = await api<{ projectsDir: string }>('/api/workspace/projects-dir');
+    restoreDefaultDir.value = data.projectsDir;
+    if (!restoreBaseDir.value.trim()) {
+      restoreBaseDir.value = data.projectsDir;
+    }
+  } catch {
+    // ignore
+  }
+  showRestoreModal.value = true;
 }
 
 const projectNameOptions = computed(() =>
@@ -1176,7 +1361,9 @@ async function refresh(silent = false): Promise<void> {
 async function refreshLogs(id: string): Promise<void> {
   try {
     const query = new URLSearchParams({ limit: '300' });
-    if (logProfileId.value) {
+    if (detailTab.value === 'repo') {
+      query.set('profileId', '__repo__');
+    } else if (logProfileId.value) {
       query.set('profileId', logProfileId.value);
     }
     const data = await api<{ logs: LogLine[] }>(
@@ -1198,7 +1385,7 @@ async function refreshLogs(id: string): Promise<void> {
 }
 
 /**
- * 清空当前筛选范围下的运行日志缓冲（不影响进程）。
+ * 清空当前筛选范围下的运行 / 仓库日志缓冲（不影响进程）。
  *
  * @returns {Promise<void>}
  */
@@ -1209,7 +1396,9 @@ async function clearLogs(): Promise<void> {
   }
   await runAction(async () => {
     const query = new URLSearchParams();
-    if (logProfileId.value) {
+    if (detailTab.value === 'repo') {
+      query.set('profileId', '__repo__');
+    } else if (logProfileId.value) {
       query.set('profileId', logProfileId.value);
     }
     const suffix = query.toString() ? `?${query.toString()}` : '';
@@ -1739,17 +1928,141 @@ async function submitAdd(event: Event): Promise<void> {
 }
 
 /**
- * 同步选中项目的 origin。
+ * 执行仓库 Git 动作：切到仓库日志 Tab，并刷新输出。
  *
+ * @param projectId - 项目 id
+ * @param runner - 请求体
  * @returns {Promise<void>}
  */
-async function syncSelected(): Promise<void> {
-  if (!selected.value) {
+async function runRepoGitAction(
+  projectId: string,
+  runner: () => Promise<void>,
+): Promise<void> {
+  selectedId.value = projectId;
+  detailTab.value = 'repo';
+  repoMenuOpen.value = false;
+  closeContextMenu();
+  await runAction(runner);
+  await refreshLogs(projectId);
+}
+
+/**
+ * 拉取最新代码（同步 origin）。
+ *
+ * @param projectId - 可选，默认当前选中
+ * @returns {Promise<void>}
+ */
+async function syncSelected(projectId?: string): Promise<void> {
+  const id = projectId ?? selected.value?.id;
+  if (!id) {
     return;
   }
-  const id = selected.value.id;
-  await runAction(async () => {
+  await runRepoGitAction(id, async () => {
     await api(`/api/projects/${id}/sync`, { method: 'POST' });
+  });
+}
+
+/**
+ * 提交当前工作区全部改动。
+ *
+ * @param projectId - 可选，默认当前选中
+ * @returns {Promise<void>}
+ */
+async function commitSelected(projectId?: string): Promise<void> {
+  const id = projectId ?? selected.value?.id;
+  if (!id) {
+    return;
+  }
+  closeContextMenu();
+  repoMenuOpen.value = false;
+  const message = window.prompt('提交说明（Conventional Commits，建议中文概述）');
+  if (message === null) {
+    return;
+  }
+  if (!message.trim()) {
+    showToast('请填写提交说明');
+    return;
+  }
+  await runRepoGitAction(id, async () => {
+    await api(`/api/projects/${id}/commit`, {
+      method: 'POST',
+      body: JSON.stringify({ message: message.trim() }),
+    });
+  });
+}
+
+/**
+ * Stash 暂存改动。
+ *
+ * @param projectId - 可选，默认当前选中
+ * @returns {Promise<void>}
+ */
+async function stashSelected(projectId?: string): Promise<void> {
+  const id = projectId ?? selected.value?.id;
+  if (!id) {
+    return;
+  }
+  closeContextMenu();
+  repoMenuOpen.value = false;
+  const message = window.prompt('Stash 说明（可留空）', '');
+  if (message === null) {
+    return;
+  }
+  await runRepoGitAction(id, async () => {
+    await api(`/api/projects/${id}/stash`, {
+      method: 'POST',
+      body: JSON.stringify({ message: message.trim() || undefined }),
+    });
+  });
+}
+
+/**
+ * Stash pop。
+ *
+ * @param projectId - 可选，默认当前选中
+ * @returns {Promise<void>}
+ */
+async function stashPopSelected(projectId?: string): Promise<void> {
+  const id = projectId ?? selected.value?.id;
+  if (!id) {
+    return;
+  }
+  closeContextMenu();
+  repoMenuOpen.value = false;
+  if (!window.confirm('确认弹出最近一次 stash？')) {
+    return;
+  }
+  await runRepoGitAction(id, async () => {
+    await api(`/api/projects/${id}/stash-pop`, { method: 'POST' });
+  });
+}
+
+/**
+ * 合并指定分支到当前分支。
+ *
+ * @param projectId - 可选，默认当前选中
+ * @returns {Promise<void>}
+ */
+async function mergeSelected(projectId?: string): Promise<void> {
+  const id = projectId ?? selected.value?.id;
+  if (!id) {
+    return;
+  }
+  closeContextMenu();
+  repoMenuOpen.value = false;
+  const branch = window.prompt('要合并进来的分支（如 feature/x 或 origin/dev）');
+  if (branch === null) {
+    return;
+  }
+  if (!branch.trim()) {
+    showToast('请填写分支名');
+    return;
+  }
+  await runRepoGitAction(id, async () => {
+    await api(`/api/projects/${id}/merge`, {
+      method: 'POST',
+      body: JSON.stringify({ branch: branch.trim() }),
+    });
   });
 }
 
@@ -1904,15 +2217,19 @@ async function checkoutContextBranch(branchName: string): Promise<void> {
     return;
   }
   closeContextMenu();
+  selectedId.value = project.id;
+  detailTab.value = 'repo';
   startSwitchProgress(project.name || project.id, branchName);
   busy.value = true;
   error.value = null;
   try {
     await checkoutBranchWithProgress(project.id, branchName);
     await refresh();
+    await refreshLogs(project.id);
     showToast(`已切换到分支 ${branchName}`);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
+    await refreshLogs(project.id);
   } finally {
     stopSwitchProgress();
     busy.value = false;
@@ -2150,16 +2467,22 @@ function openAddProjectInCategory(categoryId: string): void {
 }
 
 /**
- * 全局点击 / Esc 关闭右键菜单。
+ * 全局点击关闭右键菜单与账户菜单。
  *
  * @param event - 事件
  * @returns {void}
  */
 function onGlobalPointerDown(event: Event): void {
+  const target = event.target as HTMLElement | null;
+  if (showAccountMenu.value && !target?.closest?.('[data-account-menu]')) {
+    showAccountMenu.value = false;
+  }
+  if (repoMenuOpen.value && !target?.closest?.('[data-repo-menu]')) {
+    repoMenuOpen.value = false;
+  }
   if (!contextMenu.value) {
     return;
   }
-  const target = event.target as HTMLElement | null;
   if (target?.closest?.('[data-context-menu]')) {
     return;
   }
@@ -2167,15 +2490,18 @@ function onGlobalPointerDown(event: Event): void {
 }
 
 /**
- * Esc 关闭右键菜单。
+ * Esc 关闭右键菜单与账户菜单。
  *
  * @param event - 键盘事件
  * @returns {void}
  */
 function onGlobalKeydown(event: KeyboardEvent): void {
-  if (event.key === 'Escape') {
-    closeContextMenu();
+  if (event.key !== 'Escape') {
+    return;
   }
+  closeContextMenu();
+  showAccountMenu.value = false;
+  repoMenuOpen.value = false;
 }
 
 /**
@@ -2680,7 +3006,13 @@ watch(
 );
 
 watch(logProfileId, () => {
-  if (selectedId.value) {
+  if (selectedId.value && detailTab.value === 'logs') {
+    void refreshLogs(selectedId.value);
+  }
+});
+
+watch(detailTab, (tab) => {
+  if (selectedId.value && (tab === 'logs' || tab === 'repo')) {
     void refreshLogs(selectedId.value);
   }
 });
@@ -2891,83 +3223,96 @@ watch(logProfileId, () => {
         </div>
       </div>
       <div class="flex flex-wrap items-center gap-2 sm:gap-3">
+        <button
+          v-if="authUser && missingProjects.length > 0"
+          type="button"
+          class="rounded border border-[var(--line)] px-2.5 py-1.5 text-xs hover:border-[var(--accent)]/40"
+          :disabled="busy"
+          @click="openRestoreModal"
+        >
+          恢复缺失 {{ missingProjects.length }}
+        </button>
+        <button
+          v-if="authUser"
+          type="button"
+          class="rounded border border-[var(--line)] px-2.5 py-1.5 text-xs text-[var(--muted)] hover:border-[var(--accent)]/40 hover:text-[var(--text)]"
+          :disabled="busy"
+          title="用 Cursor 多根工作区打开，源代码管理才能看到 projects 下托管仓"
+          @click="openGitWorkspace"
+        >
+          打开 Git 工作区
+        </button>
         <div
           v-if="authUser"
-          class="flex flex-wrap items-center gap-2 rounded-md border border-[var(--line)] bg-[#0b1016]/60 px-3 py-1.5 text-xs"
+          data-account-menu
+          class="relative"
         >
-          <span>{{ authUser.phoneMasked }}</span>
           <button
             type="button"
-            class="rounded border border-[var(--accent)]/40 px-1.5 py-0.5 text-[var(--accent)] hover:bg-[var(--accent)]/10"
-            :title="authUser.planExpiresAt ? `到期 ${authUser.planExpiresAt.slice(0, 10)}` : '当前套餐'"
-            @click="openUpgrade('general')"
+            class="flex items-center gap-2 rounded-md border border-[var(--line)] bg-[#0b1016]/60 px-3 py-1.5 text-xs hover:border-[var(--accent)]/40"
+            :aria-expanded="showAccountMenu"
+            @click="setAccountMenuOpen()"
           >
-            {{ planSummary }}
+            <span>{{ authUser.phoneMasked }}</span>
+            <span class="text-[var(--muted)]">账户管理</span>
+            <span class="text-[var(--muted)]">{{ showAccountMenu ? '▴' : '▾' }}</span>
           </button>
-          <span
-            v-if="authUser.projectLimit != null"
-            class="text-[var(--muted)]"
-            :class="projectAtLimit ? 'text-[var(--danger)]' : ''"
+          <div
+            v-if="showAccountMenu"
+            class="absolute right-0 z-40 mt-2 w-64 overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--panel)] shadow-xl"
           >
-            项目 {{ authUser.projectCount ?? projects.length }}/{{ authUser.projectLimit }}
-          </span>
-          <span
-            v-if="authUser.aiQuota"
-            class="text-[var(--muted)]"
-            :class="aiAtLimit ? 'text-[var(--danger)]' : ''"
-          >
-            AI {{ authUser.aiQuota.remaining }}/{{ authUser.aiQuota.limit }}
-          </span>
-          <button
-            v-if="authUser.inviteCode"
-            type="button"
-            class="rounded border border-[var(--line)] px-2 py-0.5 text-[var(--muted)] hover:border-[var(--accent)]/40 hover:text-[var(--text)]"
-            :title="`邀请码 ${authUser.inviteCode}（点击复制）`"
-            @click="copyInviteCode"
-          >
-            邀请码
-          </button>
-          <button
-            type="button"
-            class="rounded border border-[var(--accent)]/50 px-2 py-0.5 text-[var(--accent)] hover:bg-[var(--accent)]/10"
-            @click="openUpgrade(projectAtLimit ? 'project' : aiAtLimit ? 'ai' : 'general')"
-          >
-            套餐
-          </button>
-          <button
-            v-if="missingProjects.length > 0"
-            type="button"
-            class="rounded border border-[var(--line)] px-2 py-0.5 hover:border-[var(--accent)]/40"
-            :disabled="busy"
-            @click="restoreMissing"
-          >
-            恢复缺失 {{ missingProjects.length }}
-          </button>
-          <button
-            type="button"
-            class="rounded border border-[var(--line)] px-2 py-0.5 text-[var(--muted)] hover:border-[var(--accent)]/40 hover:text-[var(--text)]"
-            :disabled="busy"
-            title="用 Cursor 多根工作区打开，源代码管理才能看到 projects 下托管仓"
-            @click="openGitWorkspace"
-          >
-            打开 Git 工作区
-          </button>
-          <button
-            type="button"
-            class="text-[var(--muted)] hover:text-[var(--text)]"
-            :disabled="busy || passwordBusy"
-            @click="openPasswordModal"
-          >
-            改密码
-          </button>
-          <button
-            type="button"
-            class="text-[var(--muted)] hover:text-[var(--text)]"
-            :disabled="busy"
-            @click="logout"
-          >
-            退出
-          </button>
+            <div class="border-b border-[var(--line)] px-3 py-2.5 text-xs">
+              <p class="font-medium text-[var(--text)]">{{ authUser.phoneMasked }}</p>
+              <p class="mt-1 text-[var(--accent)]">{{ planSummary }}</p>
+              <p
+                v-if="authUser.projectLimit != null"
+                class="mt-1 text-[var(--muted)]"
+                :class="projectAtLimit ? 'text-[var(--danger)]' : ''"
+              >
+                项目 {{ authUser.projectCount ?? projects.length }}/{{ authUser.projectLimit }}
+              </p>
+              <p
+                v-if="authUser.aiQuota"
+                class="mt-0.5 text-[var(--muted)]"
+                :class="aiAtLimit ? 'text-[var(--danger)]' : ''"
+              >
+                AI {{ authUser.aiQuota.remaining }}/{{ authUser.aiQuota.limit }}
+              </p>
+            </div>
+            <div class="py-1 text-sm">
+              <button
+                v-if="authUser.inviteCode"
+                type="button"
+                class="flex w-full items-center px-3 py-2 text-left text-[var(--text)] hover:bg-[var(--accent)]/10"
+                @click="copyInviteCode"
+              >
+                复制邀请码
+              </button>
+              <button
+                type="button"
+                class="flex w-full items-center px-3 py-2 text-left text-[var(--text)] hover:bg-[var(--accent)]/10"
+                @click="openUpgrade(projectAtLimit ? 'project' : aiAtLimit ? 'ai' : 'general')"
+              >
+                套餐与权限
+              </button>
+              <button
+                type="button"
+                class="flex w-full items-center px-3 py-2 text-left text-[var(--text)] hover:bg-[var(--accent)]/10"
+                :disabled="busy || passwordBusy"
+                @click="openPasswordModal"
+              >
+                修改密码
+              </button>
+              <button
+                type="button"
+                class="flex w-full items-center px-3 py-2 text-left text-[var(--danger)] hover:bg-[var(--danger)]/10"
+                :disabled="busy"
+                @click="logout"
+              >
+                退出登录
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </header>
@@ -3417,15 +3762,82 @@ watch(logProfileId, () => {
                 >
                   分析总结
                 </button>
-                <button
-                  type="button"
-                  :disabled="busy"
-                  class="rounded-md border px-3 py-1.5 text-xs font-medium disabled:opacity-40"
-                  :class="toneClass()"
-                  @click="syncSelected"
-                >
-                  同步 origin
-                </button>
+                <div class="relative" data-repo-menu>
+                  <button
+                    type="button"
+                    :disabled="busy || !selected.exists || !selected.isGitRepo"
+                    class="rounded-md border px-3 py-1.5 text-xs font-medium disabled:opacity-40"
+                    :class="
+                      detailTab === 'repo' || repoMenuOpen
+                        ? 'border-[var(--accent)]/50 text-[var(--accent)] bg-[var(--accent)]/10'
+                        : toneClass()
+                    "
+                    :title="
+                      !selected.isGitRepo
+                        ? '非 Git 仓库'
+                        : '拉取 / 提交 / stash / merge'
+                    "
+                    @click="repoMenuOpen = !repoMenuOpen"
+                  >
+                    仓库 ▾
+                  </button>
+                  <div
+                    v-if="repoMenuOpen"
+                    class="absolute right-0 z-40 mt-1 min-w-[10.5rem] rounded-lg border border-[var(--line)] bg-[var(--panel)] py-1 shadow-2xl"
+                  >
+                    <button
+                      type="button"
+                      class="block w-full px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5 disabled:opacity-40"
+                      :disabled="busy"
+                      @click="syncSelected()"
+                    >
+                      拉取最新（同步 origin）
+                    </button>
+                    <button
+                      type="button"
+                      class="block w-full px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5 disabled:opacity-40"
+                      :disabled="busy"
+                      @click="commitSelected()"
+                    >
+                      提交代码
+                    </button>
+                    <button
+                      type="button"
+                      class="block w-full px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5 disabled:opacity-40"
+                      :disabled="busy"
+                      @click="stashSelected()"
+                    >
+                      Stash
+                    </button>
+                    <button
+                      type="button"
+                      class="block w-full px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5 disabled:opacity-40"
+                      :disabled="busy"
+                      @click="stashPopSelected()"
+                    >
+                      Stash pop
+                    </button>
+                    <button
+                      type="button"
+                      class="block w-full px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5 disabled:opacity-40"
+                      :disabled="busy"
+                      @click="mergeSelected()"
+                    >
+                      Merge 分支…
+                    </button>
+                    <div class="my-1 border-t border-[var(--line)]" />
+                    <button
+                      type="button"
+                      class="block w-full px-3 py-1.5 text-left text-xs text-[var(--muted)] hover:bg-white/5 hover:text-[var(--text)]"
+                      @click="
+                        repoMenuOpen = false;
+                        detailTab = 'repo';
+                      "
+                    >
+                      查看仓库日志
+                    </button>
+                  </div>
+                </div>
                 <button
                   type="button"
                   :disabled="busy"
@@ -3917,6 +4329,18 @@ watch(logProfileId, () => {
                   type="button"
                   class="rounded px-3 py-1 text-xs font-medium"
                   :class="
+                    detailTab === 'repo'
+                      ? 'bg-[var(--accent)]/15 text-[var(--accent)]'
+                      : 'text-[var(--muted)] hover:text-[var(--text)]'
+                  "
+                  @click="detailTab = 'repo'"
+                >
+                  仓库日志
+                </button>
+                <button
+                  type="button"
+                  class="rounded px-3 py-1 text-xs font-medium"
+                  :class="
                     detailTab === 'analysis'
                       ? 'bg-[var(--accent)]/15 text-[var(--accent)]'
                       : 'text-[var(--muted)] hover:text-[var(--text)]'
@@ -3927,7 +4351,10 @@ watch(logProfileId, () => {
                   <span v-if="selected.hasAnalysis" class="ml-1 text-[10px] opacity-80">●</span>
                 </button>
               </div>
-              <div v-if="detailTab === 'logs'" class="flex flex-wrap items-center gap-2">
+              <div
+                v-if="detailTab === 'logs'"
+                class="flex flex-wrap items-center gap-2"
+              >
                 <select
                   :value="logProfileId ?? ''"
                   class="rounded border border-[var(--line)] bg-[#0b1016] px-2 py-1 text-xs outline-none"
@@ -3966,6 +4393,20 @@ watch(logProfileId, () => {
                   清空
                 </button>
               </div>
+              <div
+                v-else-if="detailTab === 'repo'"
+                class="flex flex-wrap items-center gap-2"
+              >
+                <span class="text-xs text-[var(--muted)]">拉取 / 提交 / stash / merge · 自动刷新</span>
+                <button
+                  type="button"
+                  :disabled="busy || logs.length === 0"
+                  class="rounded border border-[var(--line)] px-2 py-1 text-[11px] text-[var(--muted)] hover:border-[var(--danger)]/40 hover:text-[var(--danger)] disabled:opacity-40"
+                  @click="clearLogs"
+                >
+                  清空
+                </button>
+              </div>
               <div v-else class="flex flex-wrap items-center gap-2">
                 <span v-if="analysis?.updatedAt" class="text-xs text-[var(--muted)]">
                   更新于 {{ analysis.updatedAt.slice(0, 19).replace('T', ' ') }}
@@ -3982,11 +4423,17 @@ watch(logProfileId, () => {
             </div>
 
             <div
-              v-show="detailTab === 'logs'"
+              v-show="detailTab === 'logs' || detailTab === 'repo'"
               ref="logPanel"
               class="mono min-h-0 flex-1 overflow-auto rounded-lg border border-[var(--line)] bg-[#0b1016] p-3 text-xs leading-5"
             >
-              <span v-if="logs.length === 0" class="text-[var(--muted)]">暂无日志</span>
+              <span v-if="logs.length === 0" class="text-[var(--muted)]">
+                {{
+                  detailTab === 'repo'
+                    ? '暂无仓库操作日志。可通过顶部「仓库」菜单或侧栏右键执行拉取 / 提交 / stash / merge。'
+                    : '暂无日志'
+                }}
+              </span>
               <div
                 v-for="(line, index) in logs"
                 :key="`${line.ts}-${index}`"
@@ -4106,6 +4553,140 @@ watch(logProfileId, () => {
           </button>
         </div>
       </form>
+    </div>
+
+    <div
+      v-if="showRestoreModal"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      @click.self="!restoreBusy && (showRestoreModal = false)"
+    >
+      <div class="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--panel)] shadow-2xl">
+        <div class="shrink-0 border-b border-[var(--line)] px-5 py-4">
+          <h3 class="text-lg font-medium">恢复缺失项目</h3>
+          <p class="mt-1 text-sm text-[var(--muted)]">
+            勾选要恢复的仓库，选择落地父目录；每个项目会克隆到「父目录 / 项目 id」。
+          </p>
+        </div>
+        <div class="shrink-0 space-y-3 border-b border-[var(--line)] px-5 py-4">
+          <label class="block text-sm">
+            恢复位置（父目录）
+            <div class="mt-1 flex flex-wrap gap-2">
+              <input
+                v-model="restoreBaseDir"
+                type="text"
+                class="min-w-0 flex-1 rounded-md border border-[var(--line)] bg-[#0b1016] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]"
+                placeholder="例如 D:\LabHubProjects"
+                :disabled="restoreBusy"
+              >
+              <button
+                type="button"
+                class="rounded-md border border-[var(--line)] px-3 py-2 text-sm text-[var(--muted)] hover:border-[var(--accent)]/40 hover:text-[var(--text)] disabled:opacity-50"
+                :disabled="restoreBusy"
+                @click="pickRestoreBaseDir"
+              >
+                浏览…
+              </button>
+              <button
+                v-if="restoreDefaultDir"
+                type="button"
+                class="rounded-md border border-[var(--line)] px-3 py-2 text-sm text-[var(--muted)] hover:border-[var(--accent)]/40 hover:text-[var(--text)] disabled:opacity-50"
+                :disabled="restoreBusy"
+                @click="useDefaultRestoreDir"
+              >
+                默认目录
+              </button>
+            </div>
+          </label>
+          <p v-if="restoreDefaultDir" class="text-xs text-[var(--muted)]">
+            默认：{{ restoreDefaultDir }}
+          </p>
+        </div>
+        <div class="min-h-0 flex-1 overflow-y-auto px-5 py-3">
+          <label class="mb-2 flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              class="accent-[var(--accent)]"
+              :checked="restoreSelectedIds.length > 0 && restoreSelectedIds.length === restoreRows.length"
+              :disabled="restoreBusy || restoreRows.length === 0"
+              @change="setRestoreSelectAll(($event.target as HTMLInputElement).checked)"
+            >
+            全选（{{ restoreSelectedIds.length }}/{{ restoreRows.length }}）
+          </label>
+          <ul class="space-y-2">
+            <li
+              v-for="row in restoreRows"
+              :key="row.id"
+              class="rounded-lg border border-[var(--line)] bg-[#0b1016]/50 px-3 py-2"
+            >
+              <label class="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  class="mt-1 accent-[var(--accent)]"
+                  :checked="restoreSelectedIds.includes(row.id)"
+                  :disabled="restoreBusy"
+                  @change="setRestoreItemChecked(row.id, ($event.target as HTMLInputElement).checked)"
+                >
+                <span class="min-w-0 flex-1">
+                  <span class="font-medium">{{ row.name }}</span>
+                  <span class="ml-2 text-xs text-[var(--muted)]">{{ row.id }}</span>
+                  <span class="mt-0.5 block truncate text-xs text-[var(--muted)]">{{ row.repoUrl }}</span>
+                </span>
+                <span
+                  class="shrink-0 text-xs"
+                  :class="{
+                    'text-[var(--muted)]': row.status === 'pending' || row.status === 'skipped',
+                    'text-[var(--accent)]': row.status === 'running',
+                    'text-emerald-400': row.status === 'done',
+                    'text-[var(--danger)]': row.status === 'error',
+                  }"
+                >
+                  {{
+                    row.status === 'pending'
+                      ? '等待'
+                      : row.status === 'running'
+                        ? '进行中'
+                        : row.status === 'done'
+                          ? '完成'
+                          : row.status === 'error'
+                            ? '失败'
+                            : '跳过'
+                  }}
+                </span>
+              </label>
+              <p
+                class="mt-1 pl-6 text-xs"
+                :class="row.status === 'error' ? 'text-[var(--danger)]' : 'text-[var(--muted)]'"
+              >
+                {{ row.message }}
+              </p>
+              <div
+                v-if="row.status === 'running'"
+                class="mt-2 ml-6 h-1.5 overflow-hidden rounded-full bg-[var(--line)]"
+              >
+                <div class="h-full w-1/2 animate-pulse rounded-full bg-[var(--accent)]" />
+              </div>
+            </li>
+          </ul>
+        </div>
+        <div class="flex shrink-0 justify-end gap-2 border-t border-[var(--line)] px-5 py-4">
+          <button
+            type="button"
+            class="rounded-md border border-[var(--line)] px-3 py-2 text-sm text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-50"
+            :disabled="restoreBusy"
+            @click="showRestoreModal = false"
+          >
+            {{ restoreBusy ? '恢复中…' : '关闭' }}
+          </button>
+          <button
+            type="button"
+            class="rounded-md bg-[var(--accent)] px-3 py-2 text-sm font-semibold text-[#06221f] disabled:opacity-50"
+            :disabled="restoreBusy || restoreSelectedIds.length === 0"
+            @click="startRestoreSelected"
+          >
+            {{ restoreBusy ? '正在恢复…' : `开始恢复（${restoreSelectedIds.length}）` }}
+          </button>
+        </div>
+      </div>
     </div>
 
     <div
@@ -4712,6 +5293,58 @@ watch(logProfileId, () => {
             </button>
           </div>
         </div>
+        <div class="my-1 border-t border-[var(--line)]" />
+        <button
+          type="button"
+          class="block w-full px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5 disabled:opacity-40"
+          :disabled="busy || !contextProject.exists || !contextProject.isGitRepo"
+          @click="syncSelected(contextProject.id)"
+        >
+          拉取最新（同步 origin）
+        </button>
+        <button
+          type="button"
+          class="block w-full px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5 disabled:opacity-40"
+          :disabled="busy || !contextProject.exists || !contextProject.isGitRepo"
+          @click="commitSelected(contextProject.id)"
+        >
+          提交代码
+        </button>
+        <button
+          type="button"
+          class="block w-full px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5 disabled:opacity-40"
+          :disabled="busy || !contextProject.exists || !contextProject.isGitRepo"
+          @click="stashSelected(contextProject.id)"
+        >
+          Stash
+        </button>
+        <button
+          type="button"
+          class="block w-full px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5 disabled:opacity-40"
+          :disabled="busy || !contextProject.exists || !contextProject.isGitRepo"
+          @click="stashPopSelected(contextProject.id)"
+        >
+          Stash pop
+        </button>
+        <button
+          type="button"
+          class="block w-full px-3 py-1.5 text-left text-xs text-[var(--text)] hover:bg-white/5 disabled:opacity-40"
+          :disabled="busy || !contextProject.exists || !contextProject.isGitRepo"
+          @click="mergeSelected(contextProject.id)"
+        >
+          Merge 分支…
+        </button>
+        <button
+          type="button"
+          class="block w-full px-3 py-1.5 text-left text-xs text-[var(--muted)] hover:bg-white/5 hover:text-[var(--text)]"
+          @click="
+            closeContextMenu();
+            selectedId = contextProject.id;
+            detailTab = 'repo';
+          "
+        >
+          查看仓库日志
+        </button>
         <div class="relative">
           <button
             type="button"

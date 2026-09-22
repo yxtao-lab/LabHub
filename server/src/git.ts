@@ -607,14 +607,123 @@ export async function checkoutProjectBranch(
  *
  * @param cwd - 仓库目录
  * @param branch - 分支名
- * @returns {Promise<void>}
+ * @returns 命令输出摘要
  * @throws {Error} 失败时抛出
  */
-export async function pullOrigin(cwd: string, branch: string): Promise<void> {
+export async function pullOrigin(
+  cwd: string,
+  branch: string,
+): Promise<{ stdout: string; stderr: string }> {
   const target = assertSafeBranchName(branch);
   await fetchOriginBranch(cwd, target);
   const merge = await git(cwd, ['merge', '--ff-only', `origin/${target}`]);
   if (merge.code !== 0) {
     throw new Error(`快进合并失败：${merge.stderr || merge.stdout}`);
   }
+  return { stdout: merge.stdout, stderr: merge.stderr };
+}
+
+/**
+ * 暂存全部改动（含未跟踪文件）。
+ *
+ * @param cwd - 仓库目录
+ * @param message - 可选 stash 说明
+ * @returns 命令输出
+ * @throws {Error} 失败时抛出
+ */
+export async function stashPush(
+  cwd: string,
+  message?: string,
+): Promise<{ stdout: string; stderr: string }> {
+  const args = ['stash', 'push', '-u'];
+  const note = message?.trim();
+  if (note) {
+    args.push('-m', note);
+  }
+  const result = await git(cwd, args);
+  if (result.code !== 0) {
+    throw new Error(`stash 失败：${result.stderr || result.stdout}`);
+  }
+  return result;
+}
+
+/**
+ * 弹出最近一次 stash。
+ *
+ * @param cwd - 仓库目录
+ * @returns 命令输出
+ * @throws {Error} 失败时抛出
+ */
+export async function stashPop(cwd: string): Promise<{ stdout: string; stderr: string }> {
+  const result = await git(cwd, ['stash', 'pop']);
+  if (result.code !== 0) {
+    throw new Error(`stash pop 失败：${result.stderr || result.stdout}`);
+  }
+  return result;
+}
+
+/**
+ * 合并指定分支到当前 HEAD。
+ *
+ * @param cwd - 仓库目录
+ * @param branch - 要合并进来的分支（本地名或 origin/xxx）
+ * @returns 命令输出
+ * @throws {Error} 失败时抛出
+ */
+export async function mergeBranch(
+  cwd: string,
+  branch: string,
+): Promise<{ stdout: string; stderr: string }> {
+  const target = branch.trim();
+  if (!target) {
+    throw new Error('请指定要合并的分支');
+  }
+  if (target.includes('..') || /[\s;|&$`\\]/.test(target)) {
+    throw new Error('分支名不合法');
+  }
+  if (target.startsWith('origin/')) {
+    const remoteBranch = assertSafeBranchName(target.slice('origin/'.length));
+    await fetchOriginBranch(cwd, remoteBranch);
+  }
+  const result = await git(cwd, ['merge', '--no-edit', target]);
+  if (result.code !== 0) {
+    throw new Error(`merge 失败：${result.stderr || result.stdout}`);
+  }
+  return result;
+}
+
+/**
+ * 暂存并提交全部改动。
+ *
+ * @param cwd - 仓库目录
+ * @param message - 提交说明
+ * @returns 命令输出
+ * @throws {Error} 无改动或失败时抛出
+ */
+export async function commitAll(
+  cwd: string,
+  message: string,
+): Promise<{ stdout: string; stderr: string }> {
+  const msg = message.trim();
+  if (!msg) {
+    throw new Error('请填写提交说明');
+  }
+  const add = await git(cwd, ['add', '-A']);
+  if (add.code !== 0) {
+    throw new Error(`git add 失败：${add.stderr || add.stdout}`);
+  }
+  const status = await git(cwd, ['status', '--porcelain']);
+  if (status.code !== 0) {
+    throw new Error(`git status 失败：${status.stderr || status.stdout}`);
+  }
+  if (!status.stdout.trim()) {
+    throw new Error('没有可提交的改动');
+  }
+  const result = await git(cwd, ['commit', '-m', msg]);
+  if (result.code !== 0) {
+    throw new Error(
+      `git commit 失败：${result.stderr || result.stdout}。若提示未配置 user.name/email，请先在本机设置 git 用户信息。`,
+    );
+  }
+  return result;
 }

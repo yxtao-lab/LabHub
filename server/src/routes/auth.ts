@@ -186,11 +186,16 @@ authRouter.post('/pull-catalog', requireLocalLogin, async (_req, res, next) => {
 
 /**
  * POST /api/auth/restore/:id — 按清单重新克隆缺失项目
+ * body.targetBaseDir 可选：恢复到该父目录下的 <id>
  */
 authRouter.post('/restore/:id', requireLocalLogin, async (req, res, next) => {
   try {
     const id = String(req.params.id);
-    const record = await restoreProjectFromCatalog(id);
+    const targetBaseDir =
+      typeof req.body?.targetBaseDir === 'string' ? req.body.targetBaseDir.trim() : '';
+    const record = await restoreProjectFromCatalog(id, {
+      targetBaseDir: targetBaseDir || undefined,
+    });
     if (!record) {
       res.status(400).json({ error: '无需恢复' });
       return;
@@ -203,15 +208,34 @@ authRouter.post('/restore/:id', requireLocalLogin, async (req, res, next) => {
 
 /**
  * POST /api/auth/restore-missing — 批量恢复本地不存在的项目
+ * body.ids 可选：只恢复指定 id；缺省为全部缺失项
+ * body.targetBaseDir 可选：恢复父目录
  */
-authRouter.post('/restore-missing', requireLocalLogin, async (_req, res, next) => {
+authRouter.post('/restore-missing', requireLocalLogin, async (req, res, next) => {
   try {
     const list = loadProjects();
+    const targetBaseDir =
+      typeof req.body?.targetBaseDir === 'string' ? req.body.targetBaseDir.trim() : '';
+    const rawIds = Array.isArray(req.body?.ids) ? req.body.ids : null;
+    const idSet =
+      rawIds == null
+        ? null
+        : new Set(
+            rawIds
+              .map((item: unknown) => String(item || '').trim())
+              .filter(Boolean),
+          );
     const restored: string[] = [];
     const failed: Array<{ id: string; error: string }> = [];
     for (const item of list) {
+      if (idSet && !idSet.has(item.id)) {
+        continue;
+      }
       try {
-        const record = await restoreProjectFromCatalog(item.id, { skipIfExists: true });
+        const record = await restoreProjectFromCatalog(item.id, {
+          skipIfExists: true,
+          targetBaseDir: targetBaseDir || undefined,
+        });
         if (record) {
           restored.push(item.id);
         }

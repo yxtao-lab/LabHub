@@ -10,17 +10,22 @@ import { detectDependencyState } from './dependency-state.js';
 import {
   checkoutProjectBranch,
   cloneRepository,
+  commitAll,
   deriveProjectId,
   isGitRepo,
   listProjectBranches,
+  mergeBranch,
   pullOrigin,
   readGitSummary,
   sanitizeId,
+  stashPop,
+  stashPush,
   type GitCloneProgress,
 } from './git.js';
 import { extractRuntimeUrls, mergeDetectedAndConfiguredUrls } from './log-urls.js';
 import { openBrowserPreferDetected } from './open-browser.js';
 import { processManager } from './process-manager.js';
+import { appendRepoLog, clearRepoLogs, getRepoLogs } from './repo-log.js';
 import {
   DEFAULT_PROFILE_ID,
   MAX_CUSTOM_COMMAND_LENGTH,
@@ -913,6 +918,9 @@ export function getProjectLogs(
   if (!current) {
     throw new Error(`项目不存在：${id}`);
   }
+  if (profileId === '__repo__') {
+    return getRepoLogs(id, limit);
+  }
   const startProfiles = resolveStartProfiles(current);
   const buildProfiles = resolveBuildProfiles(current);
   const customCommands = resolveCustomCommands(current);
@@ -978,6 +986,10 @@ export function clearProjectLogs(
   const current = findProject(id);
   if (!current) {
     throw new Error(`项目不存在：${id}`);
+  }
+  if (profileId === '__repo__') {
+    clearRepoLogs(id);
+    return;
   }
   const startProfiles = resolveStartProfiles(current);
   const buildProfiles = resolveBuildProfiles(current);
@@ -1249,19 +1261,105 @@ export async function deleteCustomCommand(
 }
 
 /**
- * 从 origin 快进更新。
+ * 从 origin 快进更新，并写入仓库日志。
  *
  * @param id - 项目 id
  * @returns 视图
  */
 export async function syncProject(id: string): Promise<ProjectView> {
+  return runRepoAction(id, '拉取最新（同步 origin）', async (cwd, record) => {
+    const branch = record.branch || 'main';
+    appendRepoLog(id, 'system', `目标分支：${branch}`);
+    return pullOrigin(cwd, branch);
+  });
+}
+
+/**
+ * 通用仓库动作包装：校验目录、写日志、返回视图。
+ *
+ * @param id - 项目 id
+ * @param title - 动作标题
+ * @param runner - 实际 git 操作
+ * @returns 项目视图
+ */
+async function runRepoAction(
+  id: string,
+  title: string,
+  runner: (
+    cwd: string,
+    record: ProjectRecord,
+  ) => Promise<{ stdout?: string; stderr?: string } | void>,
+): Promise<ProjectView> {
   const current = findProject(id);
   if (!current) {
     throw new Error(`项目不存在：${id}`);
   }
   const absolutePath = resolveProjectPath(current.path);
-  await pullOrigin(absolutePath, current.branch);
+  if (!fs.existsSync(absolutePath)) {
+    throw new Error(`项目目录不存在：${absolutePath}`);
+  }
+  if (!isGitRepo(absolutePath)) {
+    throw new Error(`不是 Git 仓库：${absolutePath}`);
+  }
+  appendRepoLog(id, 'system', `▶ ${title}`);
+  try {
+    const result = await runner(absolutePath, current);
+    if (result?.stdout?.trim()) {
+      appendRepoLog(id, 'stdout', result.stdout.trim());
+    }
+    if (result?.stderr?.trim()) {
+      appendRepoLog(id, 'stderr', result.stderr.trim());
+    }
+    appendRepoLog(id, 'system', `✓ ${title} 完成`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    appendRepoLog(id, 'system', `✗ ${title} 失败：${message}`);
+    throw error;
+  }
   return toProjectView(current);
+}
+
+/**
+ * 提交当前工作区全部改动。
+ *
+ * @param id - 项目 id
+ * @param message - 提交说明
+ * @returns 视图
+ */
+export async function commitProject(id: string, message: string): Promise<ProjectView> {
+  return runRepoAction(id, '提交代码', async (cwd) => commitAll(cwd, message));
+}
+
+/**
+ * git stash push。
+ *
+ * @param id - 项目 id
+ * @param message - 可选说明
+ * @returns 视图
+ */
+export async function stashProject(id: string, message?: string): Promise<ProjectView> {
+  return runRepoAction(id, 'Stash', async (cwd) => stashPush(cwd, message));
+}
+
+/**
+ * git stash pop。
+ *
+ * @param id - 项目 id
+ * @returns 视图
+ */
+export async function stashPopProject(id: string): Promise<ProjectView> {
+  return runRepoAction(id, 'Stash pop', async (cwd) => stashPop(cwd));
+}
+
+/**
+ * 合并指定分支到当前分支。
+ *
+ * @param id - 项目 id
+ * @param branch - 源分支
+ * @returns 视图
+ */
+export async function mergeProjectBranch(id: string, branch: string): Promise<ProjectView> {
+  return runRepoAction(id, `Merge ${branch}`, async (cwd) => mergeBranch(cwd, branch));
 }
 
 /**
@@ -1326,20 +1424,32 @@ export async function checkoutBranchForProject(
     phase: 'clone',
     message: `正在切换到分支 ${branch.trim()}…`,
   });
-  const result = await checkoutProjectBranch(absolutePath, branch, {
-    onStatus: (message) => emit({ type: 'status', phase: 'clone', message }),
-    onProgress: (progress) =>
-      emit({
-        type: 'clone-progress',
-        stage: progress.stage,
-        percent: progress.percent,
-        received: progress.received,
-        total: progress.total,
-        remaining: progress.remaining,
-        speed: progress.speed,
-        raw: progress.raw,
-      }),
-  });
+  appendRepoLog(id, 'system', `▶ 切换分支 → ${branch.trim()}`);
+  let result: { branch: string };
+  try {
+    result = await checkoutProjectBranch(absolutePath, branch, {
+      onStatus: (message) => {
+        appendRepoLog(id, 'system', message);
+        emit({ type: 'status', phase: 'clone', message });
+      },
+      onProgress: (progress) =>
+        emit({
+          type: 'clone-progress',
+          stage: progress.stage,
+          percent: progress.percent,
+          received: progress.received,
+          total: progress.total,
+          remaining: progress.remaining,
+          speed: progress.speed,
+          raw: progress.raw,
+        }),
+    });
+    appendRepoLog(id, 'system', `✓ 已切换到 ${result.branch}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    appendRepoLog(id, 'system', `✗ 切换分支失败：${message}`);
+    throw error;
+  }
   emit({
     type: 'status',
     phase: 'done',

@@ -10,6 +10,7 @@ import {
   loadCategories,
   loadProjects,
   PROJECTS_DIR,
+  ROOT_DIR,
   resolveProjectPath,
   saveStore,
   upsertProject,
@@ -214,21 +215,40 @@ export async function pushCatalogIfLoggedIn(): Promise<void> {
 }
 
 /**
- * 按清单记录重新克隆项目到 projects/<id>。
+ * 按清单记录重新克隆项目到 projects/<id>，或自定义父目录下的 <id>。
  *
  * @param id - 项目 id
  * @param options.skipIfExists - 目录已存在则跳过并返回 null
+ * @param options.targetBaseDir - 可选父目录（绝对或相对用户根）；空则用默认 projects/
  * @returns 项目视图；跳过时 null
  */
 export async function restoreProjectFromCatalog(
   id: string,
-  options: { skipIfExists?: boolean } = {},
+  options: { skipIfExists?: boolean; targetBaseDir?: string } = {},
 ): Promise<ProjectView | null> {
   const record = findProject(id);
   if (!record) {
     throw new Error(`清单中无项目：${id}`);
   }
-  const absolutePath = path.join(PROJECTS_DIR, record.id);
+
+  const baseRaw = (options.targetBaseDir || '').trim();
+  let absolutePath: string;
+  let storedPath: string;
+  if (baseRaw) {
+    const baseDir = path.isAbsolute(baseRaw)
+      ? path.normalize(baseRaw)
+      : path.resolve(ROOT_DIR, baseRaw);
+    if (baseDir === path.parse(baseDir).root) {
+      throw new Error('恢复位置不能是磁盘根目录，请选择具体文件夹');
+    }
+    fs.mkdirSync(baseDir, { recursive: true });
+    absolutePath = path.join(baseDir, record.id);
+    storedPath = absolutePath;
+  } else {
+    absolutePath = path.join(PROJECTS_DIR, record.id);
+    storedPath = path.join('projects', record.id);
+  }
+
   if (fs.existsSync(absolutePath)) {
     if (options.skipIfExists) {
       return null;
@@ -238,7 +258,7 @@ export async function restoreProjectFromCatalog(
 
   const next = normalizeProjectRecord({
     ...record,
-    path: path.join('projects', record.id),
+    path: storedPath,
     updatedAt: new Date().toISOString(),
   });
   const cloned = await cloneRepository({

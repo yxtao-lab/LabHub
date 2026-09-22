@@ -10,15 +10,19 @@ import {
   buildProject,
   checkoutBranchForProject,
   clearProjectLogs,
+  commitProject,
   deleteCustomCommand,
   deleteProject,
   getProjectLogs,
   installProject,
   listBranchesForProject,
   listProjectViews,
+  mergeProjectBranch,
   runCustomCommand,
   runCustomCommandSchema,
   startProject,
+  stashPopProject,
+  stashProject,
   stopProject,
   syncProfilesFromPackage,
   syncProject,
@@ -339,11 +343,67 @@ projectsRouter.delete('/:id/custom-commands/:commandId', async (req, res, next) 
 });
 
 /**
- * POST /api/projects/:id/sync — git fetch/merge origin
+ * POST /api/projects/:id/sync — git fetch/merge origin（仓库日志）
  */
 projectsRouter.post('/:id/sync', async (req, res, next) => {
   try {
     const project = await syncProject(req.params.id);
+    res.json({ project });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/projects/:id/commit — body.message 提交全部改动
+ */
+projectsRouter.post('/:id/commit', async (req, res, next) => {
+  try {
+    const message = typeof req.body?.message === 'string' ? req.body.message : '';
+    const project = await commitProject(req.params.id, message);
+    res.json({ project });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/projects/:id/stash — body.message 可选
+ */
+projectsRouter.post('/:id/stash', async (req, res, next) => {
+  try {
+    const message =
+      typeof req.body?.message === 'string' ? req.body.message : undefined;
+    const project = await stashProject(req.params.id, message);
+    res.json({ project });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/projects/:id/stash-pop — 弹出最近一次 stash
+ */
+projectsRouter.post('/:id/stash-pop', async (req, res, next) => {
+  try {
+    const project = await stashPopProject(req.params.id);
+    res.json({ project });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/projects/:id/merge — body.branch 合并到当前分支
+ */
+projectsRouter.post('/:id/merge', async (req, res, next) => {
+  try {
+    const branch = typeof req.body?.branch === 'string' ? req.body.branch.trim() : '';
+    if (!branch) {
+      res.status(400).json({ error: '缺少 branch' });
+      return;
+    }
+    const project = await mergeProjectBranch(req.params.id, branch);
     res.json({ project });
   } catch (error) {
     next(error);

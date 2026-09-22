@@ -2,7 +2,7 @@
  * LabHub 桌面壳：开发时打开 Vite；安装包内启动打包后的本机服务并打开窗口。
  * Cloud 不在此进程内，仍由 config/public.json 的 cloudUrl 指向服务器。
  */
-import { app, BrowserWindow, dialog, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -132,6 +132,25 @@ function failStartup(error) {
   app.quit();
 }
 
+/**
+ * 注册桌面 IPC（目录选择等）。
+ *
+ * @returns {void}
+ */
+function registerDesktopIpc() {
+  ipcMain.handle('labhub:select-directory', async () => {
+    const owner = BrowserWindow.getFocusedWindow() || mainWindow;
+    const result = await dialog.showOpenDialog(owner ?? undefined, {
+      title: '选择恢复位置',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (result.canceled || !result.filePaths[0]) {
+      return null;
+    }
+    return result.filePaths[0];
+  });
+}
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -148,6 +167,7 @@ if (!gotLock) {
 
   app.whenReady().then(async () => {
     try {
+      registerDesktopIpc();
       if (isPackagedRuntime()) {
         await startBundledServer();
         createMainWindow(`${apiOrigin}/`);

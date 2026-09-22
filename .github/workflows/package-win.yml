@@ -33,24 +33,24 @@ jobs:
         run: pnpm install
 
       - name: Build Windows installer
+        env:
+          # 避免 electron-builder 因缺 token / 代码签名探测而失败
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: pnpm package:win
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: LabHub-Setup-windows
-          path: |
-            release/electron/LabHub-Setup-*.exe
-            release/electron/latest.yml
+          path: release/electron/LabHub-Setup-*.exe
           if-no-files-found: error
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            release/electron/LabHub-Setup-*.exe
-            release/electron/latest.yml
+          files: release/electron/LabHub-Setup-*.exe
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

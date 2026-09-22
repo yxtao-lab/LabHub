@@ -97,7 +97,16 @@ function main() {
   applyNsisDirectoryPatch();
 
   log('生成 Electron 安装包');
-  run('pnpm', ['exec', 'electron-builder', '--win', 'nsis', '--config', 'electron-builder.yml']);
+  run('pnpm', [
+    'exec',
+    'electron-builder',
+    '--win',
+    'nsis',
+    '--config',
+    'electron-builder.yml',
+    '--publish',
+    'never',
+  ]);
   log('安装包目录：release/electron');
   log('用户数据与浅克隆目录：%LOCALAPPDATA%\\LabHub');
 }

@@ -14,6 +14,8 @@ extraResources:
   - from: config/public.json
     to: config/public.json
 asar: true
+# 安装包只本地/CI 产出；发版由 Actions 的 softprops/action-gh-release 负责
+publish: null
 win:
   icon: build/icon.ico
   target:

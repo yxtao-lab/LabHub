@@ -5,7 +5,7 @@
 #   DEPLOY_HOST      服务器 IP 或域名，例如 118.25.177.69
 #   DEPLOY_USER      SSH 用户，例如 root
 #   DEPLOY_SSH_KEY   部署用私钥（整段，含 BEGIN/END）
-#   DEPLOY_PATH      可选，默认 /opt/LabHub
+#   DEPLOY_PATH      可选，默认 /opt/LabHub（不要设为空）
 #   DEPLOY_PORT      可选，默认 22
 name: Release Cloud
 
@@ -59,7 +59,10 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           PORT="${DEPLOY_PORT:-22}"
-          ssh-keyscan -p "$PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          HOST="$(printf '%s' "$DEPLOY_HOST" | tr -d '\r' | sed -e 's/^[[:space:]"'\'']*//' -e 's/[[:space:]"'\'']*$//')"
+          case "$HOST" in *@*) HOST="${HOST##*@}" ;; esac
+          case "$HOST" in *:*) HOST="${HOST%%:*}" ;; esac
+          ssh-keyscan -p "$PORT" -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Sync repository to server
         env:
@@ -68,27 +71,46 @@ jobs:
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
-          # 去掉粘贴 Secret 时常见的引号、空白、Windows 换行
-          HOST="$(printf '%s' "$DEPLOY_HOST" | tr -d '\r' | sed -e 's/^[[:space:]"'\'']*//' -e 's/[[:space:]"'\'']*$//')"
-          USER="$(printf '%s' "$DEPLOY_USER" | tr -d '\r' | sed -e 's/^[[:space:]"'\'']*//' -e 's/[[:space:]"'\'']*$//')"
-          PORT="$(printf '%s' "${DEPLOY_PORT:-22}" | tr -d '\r' | sed -e 's/^[[:space:]"'\'']*//' -e 's/[[:space:]"'\'']*$//')"
-          REMOTE_PATH="$(printf '%s' "${DEPLOY_PATH:-/opt/LabHub}" | tr -d '\r' | sed -e 's/^[[:space:]"'\'']*//' -e 's/[[:space:]"'\'']*$//')"
-          # 若误填成 root@ip 或带端口，只保留主机部分
-          case "$HOST" in
-            *@*) HOST="${HOST##*@}" ;;
-          esac
-          case "$HOST" in
-            *:*) HOST="${HOST%%:*}" ;;
-          esac
+          trim() { printf '%s' "$1" | tr -d '\r' | sed -e 's/^[[:space:]"'\'']*//' -e 's/[[:space:]"'\'']*$//'; }
+          HOST="$(trim "$DEPLOY_HOST")"
+          USER="$(trim "$DEPLOY_USER")"
+          PORT="$(trim "${DEPLOY_PORT:-22}")"
+          REMOTE_PATH="$(trim "${DEPLOY_PATH:-/opt/LabHub}")"
+          case "$HOST" in *@*) HOST="${HOST##*@}" ;; esac
+          case "$HOST" in *:*) HOST="${HOST%%:*}" ;; esac
+          # Secret 若设为空字符串，:- 默认不会生效，必须再兜底，避免同步到 /
+          if [ -z "$PORT" ]; then PORT=22; fi
+          if [ -z "$REMOTE_PATH" ] || [ "$REMOTE_PATH" = "/" ]; then
+            REMOTE_PATH="/opt/LabHub"
+          fi
           if ! printf '%s' "$HOST" | grep -Eq '^[A-Za-z0-9.-]+$'; then
             echo "DEPLOY_HOST 不合法：「$HOST」"
-            echo "只填 IP 或域名，例如 118.25.177.69，不要加引号、用户名、端口或路径。"
             exit 1
           fi
           echo "同步目标：${USER}@${HOST}:${REMOTE_PATH}/ （SSH 端口 ${PORT}）"
-          RSYNC_SSH="ssh -i ~/.ssh/deploy_key -p ${PORT} -o StrictHostKeyChecking=accept-new"
+          SSH=(ssh -i ~/.ssh/deploy_key -p "$PORT" -o StrictHostKeyChecking=accept-new)
+
+          # 远端没有 rsync 时先安装（Debian/Ubuntu）
+          "${SSH[@]}" "${USER}@${HOST}" \
+            "set -e
+             mkdir -p '${REMOTE_PATH}'
+             if ! command -v rsync >/dev/null 2>&1; then
+               echo '服务器缺少 rsync，正在安装…'
+               if command -v apt-get >/dev/null 2>&1; then
+                 export DEBIAN_FRONTEND=noninteractive
+                 apt-get update -y
+                 apt-get install -y rsync
+               elif command -v yum >/dev/null 2>&1; then
+                 yum install -y rsync
+               else
+                 echo '无法自动安装 rsync，请在服务器手动安装后重试'
+                 exit 1
+               fi
+             fi
+             command -v rsync"
+
           rsync -az --delete \
-            -e "$RSYNC_SSH" \
+            -e "ssh -i ~/.ssh/deploy_key -p ${PORT} -o StrictHostKeyChecking=accept-new" \
             --exclude '.git/' \
             --exclude 'node_modules/' \
             --exclude '**/node_modules/' \
@@ -109,16 +131,17 @@ jobs:
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
-          HOST="$(printf '%s' "$DEPLOY_HOST" | tr -d '\r' | sed -e 's/^[[:space:]"'\'']*//' -e 's/[[:space:]"'\'']*$//')"
-          USER="$(printf '%s' "$DEPLOY_USER" | tr -d '\r' | sed -e 's/^[[:space:]"'\'']*//' -e 's/[[:space:]"'\'']*$//')"
-          PORT="$(printf '%s' "${DEPLOY_PORT:-22}" | tr -d '\r' | sed -e 's/^[[:space:]"'\'']*//' -e 's/[[:space:]"'\'']*$//')"
-          REMOTE_PATH="$(printf '%s' "${DEPLOY_PATH:-/opt/LabHub}" | tr -d '\r' | sed -e 's/^[[:space:]"'\'']*//' -e 's/[[:space:]"'\'']*$//')"
-          case "$HOST" in
-            *@*) HOST="${HOST##*@}" ;;
-          esac
-          case "$HOST" in
-            *:*) HOST="${HOST%%:*}" ;;
-          esac
+          trim() { printf '%s' "$1" | tr -d '\r' | sed -e 's/^[[:space:]"'\'']*//' -e 's/[[:space:]"'\'']*$//'; }
+          HOST="$(trim "$DEPLOY_HOST")"
+          USER="$(trim "$DEPLOY_USER")"
+          PORT="$(trim "${DEPLOY_PORT:-22}")"
+          REMOTE_PATH="$(trim "${DEPLOY_PATH:-/opt/LabHub}")"
+          case "$HOST" in *@*) HOST="${HOST##*@}" ;; esac
+          case "$HOST" in *:*) HOST="${HOST%%:*}" ;; esac
+          if [ -z "$PORT" ]; then PORT=22; fi
+          if [ -z "$REMOTE_PATH" ] || [ "$REMOTE_PATH" = "/" ]; then
+            REMOTE_PATH="/opt/LabHub"
+          fi
           ssh -i ~/.ssh/deploy_key -p "$PORT" -o StrictHostKeyChecking=accept-new \
             "${USER}@${HOST}" \
             "set -e

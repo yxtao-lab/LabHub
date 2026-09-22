@@ -66,6 +66,24 @@ cp .env.example .env
 pnpm release
 ```
 
+#### 自动发布 Cloud（GitHub Actions）
+
+推送到 `main` 且改动了 Cloud 相关文件时，会自动：`rsync` 到服务器 → 远程执行 `pnpm release`（不依赖服务器 `git pull`）。也可在 Actions 里手动跑 **Release Cloud**。
+
+在 GitHub 仓库 **Settings → Secrets and variables → Actions** 配置：
+
+| Secret | 说明 |
+|--------|------|
+| `DEPLOY_HOST` | 服务器 IP/域名，如 `118.25.177.69` |
+| `DEPLOY_USER` | SSH 用户，如 `root` |
+| `DEPLOY_SSH_KEY` | 部署私钥全文 |
+| `DEPLOY_PATH` | 可选，默认 `/opt/LabHub` |
+| `DEPLOY_PORT` | 可选，默认 `22` |
+
+服务器上需已有 `services/cloud/.env`、Docker、Node；首次把部署公钥写入 `~/.ssh/authorized_keys`。同步时会保留服务器上的 `.env`，不会被覆盖。
+
+Windows 安装包：Actions 工作流 **Package Windows**（手动或打 `v*` tag）会构建 `LabHub-Setup-*.exe`；打 tag 时还会发 GitHub Release。
+
 把 Cloud 公网地址写入仓库根 [`config/public.json`](config/public.json)：
 
 ```json

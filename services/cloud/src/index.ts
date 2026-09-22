@@ -2,6 +2,7 @@ import cors from 'cors';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { z } from 'zod';
 import {
+  changePassword,
   ensureDevTestUser,
   findUserById,
   loginExistingBySms,
@@ -184,6 +185,21 @@ app.get('/v1/auth/me', requireAuth, async (req: AuthedRequest, res) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     res.status(500).json({ error: message });
+  }
+});
+
+/**
+ * POST /v1/auth/password — 已登录用户修改密码
+ */
+app.post('/v1/auth/password', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    const oldPassword = String(req.body?.oldPassword ?? '');
+    const newPassword = String(req.body?.newPassword ?? '');
+    await changePassword(req.user!.id, oldPassword, newPassword);
+    res.json({ ok: true, message: '密码已修改' });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ error: message });
   }
 });
 

@@ -364,6 +364,39 @@ export async function setUserPassword(userId: string, password: string): Promise
 }
 
 /**
+ * 已登录用户修改密码（校验原密码）。
+ *
+ * @param userId - 用户 id
+ * @param oldPassword - 原密码；若账号尚未设密则可为空
+ * @param newPassword - 新密码
+ * @returns {Promise<void>}
+ * @throws {Error} 用户不存在、原密码错误或新密码不合规
+ */
+export async function changePassword(
+  userId: string,
+  oldPassword: string,
+  newPassword: string,
+): Promise<void> {
+  assertPassword(newPassword);
+  const row = (await query<UserRow>(`${USER_SELECT} WHERE id = $1`, [userId])).rows[0];
+  if (!row) {
+    throw new Error('用户不存在');
+  }
+  if (row.password_hash) {
+    if (!oldPassword) {
+      throw new Error('请输入原密码');
+    }
+    if (!verifyPassword(oldPassword, row.password_hash)) {
+      throw new Error('原密码不正确');
+    }
+    if (oldPassword === newPassword) {
+      throw new Error('新密码不能与原密码相同');
+    }
+  }
+  await setUserPassword(userId, newPassword);
+}
+
+/**
  * 组装 /me 响应。
  *
  * @param user - 用户

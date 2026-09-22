@@ -43,6 +43,10 @@ pnpm dev
 pnpm release
 ```
 
+### 自动发布（推荐）
+
+推送到 `main` 的 Cloud 相关改动会触发 GitHub Actions **Release Cloud**：经 SSH/`rsync` 同步到服务器并执行 `pnpm release`。所需 Secrets 见仓库根 [README](../../README.md)「自动发布 Cloud」一节。也可在 Actions 页手动触发。
+
 开机自启只需在服务器上做一次：`pm2 startup`，然后 `pm2 save`（`pnpm release` 已会执行 `pm2 save`）。
 
 ## 主要接口
@@ -54,6 +58,7 @@ pnpm release
 | POST | `/v1/auth/login` | 手机号 + 密码登录 |
 | POST | `/v1/auth/sms/verify` | 已注册用户验证码登录 |
 | GET | `/v1/auth/me` | Bearer JWT |
+| POST | `/v1/auth/password` | 已登录改密 `{ oldPassword, newPassword }` |
 | GET/PUT | `/v1/catalog` | 用户项目元数据清单 |
 | POST | `/v1/analyze` | 需 JWT；扣配额后返回 markdown |
 

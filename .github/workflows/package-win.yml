@@ -1,0 +1,56 @@
+# 打 Windows 安装包并上传为 Artifact；打 tag（v*）时同时创建 GitHub Release。
+# 可在 Actions 页手动 Run workflow。
+name: Package Windows
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: package-win
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.1
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build Windows installer
+        run: pnpm package:win
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LabHub-Setup-windows
+          path: |
+            release/electron/LabHub-Setup-*.exe
+            release/electron/latest.yml
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/electron/LabHub-Setup-*.exe
+            release/electron/latest.yml
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

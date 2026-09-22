@@ -7,6 +7,7 @@ import {
   loadAuthState,
 } from '../auth-store.js';
 import {
+  cloudChangePassword,
   cloudFetchMe,
   cloudGetCatalog,
   cloudLoginPassword,
@@ -142,6 +143,20 @@ authRouter.post('/sms/verify', async (req, res, next) => {
 authRouter.post('/logout', (_req, res) => {
   clearAuthState();
   res.json({ ok: true });
+});
+
+/**
+ * POST /api/auth/password — 修改密码
+ */
+authRouter.post('/password', requireLocalLogin, async (req, res, next) => {
+  try {
+    const oldPassword = String(req.body?.oldPassword ?? '');
+    const newPassword = String(req.body?.newPassword ?? '');
+    await cloudChangePassword(oldPassword, newPassword);
+    res.json({ ok: true, message: '密码已修改' });
+  } catch (error) {
+    next(error);
+  }
 });
 
 /**

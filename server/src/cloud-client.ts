@@ -298,6 +298,23 @@ export async function cloudFetchMe(): Promise<CloudMeUser | null> {
 }
 
 /**
+ * 已登录用户修改密码。
+ *
+ * @param oldPassword - 原密码
+ * @param newPassword - 新密码
+ * @returns {Promise<void>}
+ */
+export async function cloudChangePassword(
+  oldPassword: string,
+  newPassword: string,
+): Promise<void> {
+  await cloudFetch('/v1/auth/password', {
+    method: 'POST',
+    body: JSON.stringify({ oldPassword, newPassword }),
+  });
+}
+
+/**
  * 拉取云端清单。
  *
  * @returns 项目与分类

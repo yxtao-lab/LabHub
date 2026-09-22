@@ -155,6 +155,12 @@ const contextBranchCurrent = ref<string | null>(null);
 const contextBranchesLoading = ref(false);
 const contextBranchesError = ref<string | null>(null);
 const showUpgrade = ref(false);
+const showPasswordModal = ref(false);
+const passwordOld = ref('');
+const passwordNew = ref('');
+const passwordNew2 = ref('');
+const passwordBusy = ref(false);
+const passwordError = ref<string | null>(null);
 const legalDoc = ref<LegalDocKind | null>(null);
 const upgradeReason = ref<UpgradeReason>('general');
 const billingCatalog = ref<BillingCatalog | null>(null);
@@ -934,6 +940,11 @@ async function logout(): Promise<void> {
     selectedId.value = null;
     authMode.value = 'login';
     loginMethod.value = 'password';
+    showPasswordModal.value = false;
+    passwordOld.value = '';
+    passwordNew.value = '';
+    passwordNew2.value = '';
+    passwordError.value = null;
     if (isDevClient) {
       authPhone.value = DEV_TEST_PHONE;
       authPassword.value = DEV_TEST_PASSWORD;
@@ -950,6 +961,61 @@ async function logout(): Promise<void> {
       projectsTimer = undefined;
     }
   });
+}
+
+/**
+ * 打开修改密码弹窗。
+ *
+ * @returns {void}
+ */
+function openPasswordModal(): void {
+  passwordOld.value = '';
+  passwordNew.value = '';
+  passwordNew2.value = '';
+  passwordError.value = null;
+  showPasswordModal.value = true;
+}
+
+/**
+ * 提交修改密码。
+ *
+ * @returns {Promise<void>}
+ */
+async function submitChangePassword(): Promise<void> {
+  passwordError.value = null;
+  if (passwordNew.value.length < 6) {
+    passwordError.value = '新密码至少 6 位';
+    return;
+  }
+  if (passwordNew.value !== passwordNew2.value) {
+    passwordError.value = '两次输入的新密码不一致';
+    return;
+  }
+  passwordBusy.value = true;
+  try {
+    await api('/api/auth/password', {
+      method: 'POST',
+      body: JSON.stringify({
+        oldPassword: passwordOld.value,
+        newPassword: passwordNew.value,
+      }),
+    });
+    showPasswordModal.value = false;
+    passwordOld.value = '';
+    passwordNew.value = '';
+    passwordNew2.value = '';
+    toastMessage.value = '密码已修改';
+    if (toastTimer !== undefined) {
+      window.clearTimeout(toastTimer);
+    }
+    toastTimer = window.setTimeout(() => {
+      toastMessage.value = null;
+    }, 2500);
+  } catch (err) {
+    passwordError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    passwordBusy.value = false;
+  }
 }
 
 /**
@@ -2889,6 +2955,14 @@ watch(logProfileId, () => {
           <button
             type="button"
             class="text-[var(--muted)] hover:text-[var(--text)]"
+            :disabled="busy || passwordBusy"
+            @click="openPasswordModal"
+          >
+            改密码
+          </button>
+          <button
+            type="button"
+            class="text-[var(--muted)] hover:text-[var(--text)]"
             :disabled="busy"
             @click="logout"
           >
@@ -3965,6 +4039,73 @@ watch(logProfileId, () => {
           </div>
         </template>
       </main>
+    </div>
+
+    <div
+      v-if="showPasswordModal"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      @click.self="showPasswordModal = false"
+    >
+      <form
+        class="w-full max-w-md rounded-xl border border-[var(--line)] bg-[var(--panel)] p-5 shadow-2xl"
+        @submit.prevent="submitChangePassword"
+      >
+        <h3 class="text-lg font-medium">修改密码</h3>
+        <p class="mt-1 text-sm text-[var(--muted)]">修改后请使用新密码登录。</p>
+        <label class="mt-4 block text-sm">
+          原密码
+          <input
+            v-model="passwordOld"
+            type="password"
+            autocomplete="current-password"
+            class="mt-1 w-full rounded-md border border-[var(--line)] bg-[#0b1016] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]"
+            placeholder="请输入原密码"
+            required
+          >
+        </label>
+        <label class="mt-3 block text-sm">
+          新密码
+          <input
+            v-model="passwordNew"
+            type="password"
+            autocomplete="new-password"
+            class="mt-1 w-full rounded-md border border-[var(--line)] bg-[#0b1016] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]"
+            placeholder="至少 6 位"
+            required
+            minlength="6"
+          >
+        </label>
+        <label class="mt-3 block text-sm">
+          确认新密码
+          <input
+            v-model="passwordNew2"
+            type="password"
+            autocomplete="new-password"
+            class="mt-1 w-full rounded-md border border-[var(--line)] bg-[#0b1016] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]"
+            placeholder="再输入一次"
+            required
+            minlength="6"
+          >
+        </label>
+        <p v-if="passwordError" class="mt-3 text-xs text-[var(--danger)]">{{ passwordError }}</p>
+        <div class="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            class="rounded-md border border-[var(--line)] px-3 py-2 text-sm text-[var(--muted)] hover:text-[var(--text)]"
+            :disabled="passwordBusy"
+            @click="showPasswordModal = false"
+          >
+            取消
+          </button>
+          <button
+            type="submit"
+            class="rounded-md bg-[var(--accent)] px-3 py-2 text-sm font-semibold text-[#06221f] disabled:opacity-50"
+            :disabled="passwordBusy"
+          >
+            {{ passwordBusy ? '提交中…' : '确认修改' }}
+          </button>
+        </div>
+      </form>
     </div>
 
     <div

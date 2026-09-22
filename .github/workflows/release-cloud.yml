@@ -1,0 +1,114 @@
+# 推送到 main（Cloud 相关变更）或手动触发时，经 SSH 同步代码并执行 pnpm release。
+# 服务器访问不了 GitHub 时也可用（由 Actions 主动推送，不依赖服务器 git pull）。
+#
+# 仓库 Secrets（Settings → Secrets and variables → Actions）：
+#   DEPLOY_HOST      服务器 IP 或域名，例如 118.25.177.69
+#   DEPLOY_USER      SSH 用户，例如 root
+#   DEPLOY_SSH_KEY   部署用私钥（整段，含 BEGIN/END）
+#   DEPLOY_PATH      可选，默认 /opt/LabHub
+#   DEPLOY_PORT      可选，默认 22
+name: Release Cloud
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/cloud/**'
+      - 'scripts/release-cloud.mjs'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/release-cloud.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: release-cloud
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check deploy secrets
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          missing=
+          [ -n "$DEPLOY_HOST" ] || missing="$missing DEPLOY_HOST"
+          [ -n "$DEPLOY_USER" ] || missing="$missing DEPLOY_USER"
+          [ -n "$DEPLOY_SSH_KEY" ] || missing="$missing DEPLOY_SSH_KEY"
+          if [ -n "$missing" ]; then
+            echo "缺少 Secrets:$missing"
+            echo "请在仓库 Settings → Secrets and variables → Actions 中配置后重试。"
+            exit 1
+          fi
+
+      - name: Setup SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          PORT="${DEPLOY_PORT:-22}"
+          ssh-keyscan -p "$PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Sync repository to server
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          PORT="${DEPLOY_PORT:-22}"
+          REMOTE_PATH="${DEPLOY_PATH:-/opt/LabHub}"
+          RSYNC_SSH="ssh -i ~/.ssh/deploy_key -p ${PORT} -o StrictHostKeyChecking=accept-new"
+          # 保留服务器上的 .env 与数据目录，不覆盖本地密钥
+          rsync -az --delete \
+            -e "$RSYNC_SSH" \
+            --exclude '.git/' \
+            --exclude 'node_modules/' \
+            --exclude '**/node_modules/' \
+            --exclude 'release/' \
+            --exclude 'projects/' \
+            --exclude 'data/' \
+            --exclude '.env' \
+            --exclude 'services/cloud/.env' \
+            --exclude 'services/cloud/dist/' \
+            --exclude 'client/dist/' \
+            --exclude 'server/dist/' \
+            ./ "${DEPLOY_USER}@${DEPLOY_HOST}:${REMOTE_PATH}/"
+
+      - name: Run pnpm release on server
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          PORT="${DEPLOY_PORT:-22}"
+          REMOTE_PATH="${DEPLOY_PATH:-/opt/LabHub}"
+          ssh -i ~/.ssh/deploy_key -p "$PORT" -o StrictHostKeyChecking=accept-new \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "set -e
+             cd '${REMOTE_PATH}'
+             if command -v corepack >/dev/null 2>&1; then corepack enable; fi
+             if ! command -v pnpm >/dev/null 2>&1; then
+               npm install -g pnpm@10.30.1
+             fi
+             if ! command -v pm2 >/dev/null 2>&1; then
+               npm install -g pm2
+             fi
+             if [ ! -f services/cloud/.env ]; then
+               echo '服务器缺少 services/cloud/.env，请先手动创建后再发布'
+               exit 1
+             fi
+             pnpm release"

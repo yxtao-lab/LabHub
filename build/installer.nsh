@@ -2,9 +2,26 @@
 ; 1) 盘符根目录时补产品名
 ; 2) 安装时选择「数据目录」（与程序目录分离）
 ; 3) 卸载时尽量保留安装目录内的用户文件夹
+;
+; 注意：electron-builder 会分别编译安装包与卸载包；
+; 安装页相关 Function 必须包在 !ifndef BUILD_UNINSTALLER 内，
+; 否则卸载包会报 warning 0010（未引用函数）并因 warning-as-error 失败。
 
 !include "nsDialogs.nsh"
 !include "LogicLib.nsh"
+
+; 安装初始化：数据目录默认读注册表，否则 %LOCALAPPDATA%\LabHub
+; （卸载包编译时 BUILD_UNINSTALLER 已定义，此处整段跳过，避免未用变量告警）
+!macro customInit
+  !ifndef BUILD_UNINSTALLER
+    ReadRegStr $labhubDataDir HKCU "Software\LabHub" "DataDir"
+    ${If} $labhubDataDir == ""
+      StrCpy $labhubDataDir "$LOCALAPPDATA\LabHub"
+    ${EndIf}
+  !endif
+!macroend
+
+!ifndef BUILD_UNINSTALLER
 
 Var labhubDataDir
 Var labhubDataDialog
@@ -35,21 +52,13 @@ labhub_v_addsep:
 labhub_v_done:
 FunctionEnd
 
-; 安装初始化：数据目录默认读注册表，否则 %LOCALAPPDATA%\LabHub
-!macro customInit
-  ReadRegStr $labhubDataDir HKCU "Software\LabHub" "DataDir"
-  ${If} $labhubDataDir == ""
-    StrCpy $labhubDataDir "$LOCALAPPDATA\LabHub"
-  ${EndIf}
-!macroend
-
 ; 程序目录页之后：选择数据目录
 !macro customPageAfterChangeDir
   Page custom labhubDataDirPageCreate labhubDataDirPageLeave
 !macroend
 
 Function labhubDataDirPageCreate
-  ; 不用 MUI_HEADER_TEXT（electron-builder 包含本文件时尚无该宏）
+  ; 不用 MUI_HEADER_TEXT（本文件被 include 时尚无该宏）
   GetDlgItem $0 $HWNDPARENT 1037
   SendMessage $0 ${WM_SETTEXT} 0 "STR:选择数据目录"
   GetDlgItem $0 $HWNDPARENT 1038
@@ -152,6 +161,8 @@ labhub_norm_done:
   Pop $R1
   Exch $R0
 FunctionEnd
+
+!endif ; BUILD_UNINSTALLER
 
 ; 安装完成后写入数据目录配置
 !macro customInstall

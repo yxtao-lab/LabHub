@@ -127,7 +127,7 @@ labhub_d_ok:
   StrLen $0 $R8
   StrCpy $1 $R9 $0
   StrCmp $1 $R8 0 labhub_d_pass
-  ; DataDir 以 INSTDIR 为前缀，还需下一段是 \
+  ; DataDir 以 INSTDIR 为前缀时，下一段须为路径分隔符
   StrCpy $2 $R9 1 $0
   StrCmp $2 "\" labhub_d_in_inst labhub_d_pass
 labhub_d_in_inst:
@@ -136,7 +136,7 @@ labhub_d_in_inst:
 labhub_d_pass:
 FunctionEnd
 
-; 去掉路径末尾 \，便于比较
+; 去掉路径末尾反斜杠，便于比较
 Function labhubNormalizeDir
   Exch $R0
   Push $R1

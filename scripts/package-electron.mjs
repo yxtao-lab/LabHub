@@ -228,7 +228,7 @@ function main() {
     'never',
   ]);
   log('安装包目录：release/electron');
-  log('用户数据与浅克隆目录：%LOCALAPPDATA%\\LabHub');
+  log('用户数据与浅克隆目录：%LOCALAPPDATA%\\LabHubData');
 }
 
 try {

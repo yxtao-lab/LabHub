@@ -79,7 +79,7 @@ export const APP_ROOT = resolveAppRoot();
 /**
  * 用户可写目录：清单、登录态与默认代码仓库。
  * 打包后由安装向导写入的 LABHUB_HOME（或注册表 / labhub-data-dir.txt）决定；
- * 未配置时回退 `%LOCALAPPDATA%\\LabHub`。开发态为仓库根。
+ * 未配置时回退 `%LOCALAPPDATA%\\LabHubData`。开发态为仓库根。
  *
  * @returns 用户数据根目录
  */
@@ -92,7 +92,7 @@ export function resolveUserRoot(): string {
     return path.resolve(override);
   }
   const base = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
-  return path.join(base, 'LabHub');
+  return path.join(base, 'LabHubData');
 }
 
 /**

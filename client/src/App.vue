@@ -347,6 +347,24 @@ function isUnderInstallDir(dirPath: string): boolean {
 }
 
 /**
+ * 选目录后自动带上 LabHubData 子目录（已有则不重复追加）。
+ *
+ * @param dirPath - 用户选择的父目录或完整数据目录
+ * @returns 带 LabHubData 的绝对路径风格字符串
+ */
+function ensureLabHubDataSubdir(dirPath: string): string {
+  const trimmed = dirPath.trim().replace(/[\\/]+$/, '');
+  if (!trimmed) {
+    return trimmed;
+  }
+  if (/[\\/]LabHubData$/i.test(trimmed) || /^LabHubData$/i.test(trimmed)) {
+    return trimmed;
+  }
+  const sep = trimmed.includes('/') && !trimmed.includes('\\') ? '/' : '\\';
+  return `${trimmed}${sep}LabHubData`;
+}
+
+/**
  * 当前恢复路径是否选到了安装目录（需警示）。
  */
 const restorePathIsInstallDir = computed(() =>
@@ -1120,16 +1138,17 @@ async function pickSettingsDataDir(): Promise<void> {
     showToast('请在桌面版中选择目录，或手动粘贴路径');
     return;
   }
-  const selected = await desktop.selectDirectory({ title: '选择新的数据存储目录' });
+  const selected = await desktop.selectDirectory({ title: '选择父文件夹（将自动加上 LabHubData）' });
   if (!selected) {
     return;
   }
-  if (isUnderInstallDir(selected)) {
+  const withSubdir = ensureLabHubDataSubdir(selected);
+  if (isUnderInstallDir(withSubdir) || isUnderInstallDir(selected)) {
     showToast('不能选择程序安装目录或其子目录，请另选位置');
     settingsMessage.value = `禁止使用安装目录：${restoreInstallDir.value || selected}`;
     return;
   }
-  settingsDraftDir.value = selected;
+  settingsDraftDir.value = withSubdir;
   settingsMessage.value = null;
 }
 
@@ -1139,7 +1158,10 @@ async function pickSettingsDataDir(): Promise<void> {
  * @returns {Promise<void>}
  */
 async function submitMigrateDataDir(): Promise<void> {
-  const target = settingsDraftDir.value.trim();
+  const target = ensureLabHubDataSubdir(settingsDraftDir.value.trim());
+  if (target) {
+    settingsDraftDir.value = target;
+  }
   if (!target) {
     showToast('请选择新的数据目录');
     return;
@@ -5014,7 +5036,7 @@ watch(detailTab, (tab) => {
           </div>
         </label>
         <p class="mt-2 text-xs text-[var(--muted)]">
-          新目录建议为空，或已是 LabHub 数据目录。禁止选择程序安装目录及其子目录。
+          浏览时会自动加上 LabHubData 子目录。禁止选择程序安装目录及其子目录。
         </p>
         <p
           v-if="settingsDraftDir.trim() && isUnderInstallDir(settingsDraftDir)"

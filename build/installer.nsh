@@ -10,13 +10,13 @@
 !include "nsDialogs.nsh"
 !include "LogicLib.nsh"
 
-; 安装初始化：数据目录默认读注册表，否则 %LOCALAPPDATA%\LabHub
+; 安装初始化：数据目录默认读注册表，否则 %LOCALAPPDATA%\LabHubData
 ; （卸载包编译时 BUILD_UNINSTALLER 已定义，此处整段跳过，避免未用变量告警）
 !macro customInit
   !ifndef BUILD_UNINSTALLER
     ReadRegStr $labhubDataDir HKCU "Software\LabHub" "DataDir"
     ${If} $labhubDataDir == ""
-      StrCpy $labhubDataDir "$LOCALAPPDATA\LabHub"
+      StrCpy $labhubDataDir "$LOCALAPPDATA\LabHubData"
     ${EndIf}
   !endif
 !macroend
@@ -70,7 +70,7 @@ Function labhubDataDirPageCreate
     Abort
   ${EndIf}
 
-  ${NSD_CreateLabel} 0 0 100% 36u "请选择 LabHub 数据目录。此后添加/恢复仓库将固定写入「数据目录\projects」，应用内不可再改。"
+  ${NSD_CreateLabel} 0 0 100% 36u "请选择数据目录的父文件夹，浏览后会自动带上 LabHubData 子目录。仓库将写入「数据目录\projects」，应用内不可再改。"
   Pop $0
 
   ${NSD_CreateLabel} 0 48u 100% 12u "数据目录："
@@ -83,19 +83,55 @@ Function labhubDataDirPageCreate
   Pop $labhubDataBrowseBtn
   ${NSD_OnClick} $labhubDataBrowseBtn labhubBrowseDataDir
 
-  ${NSD_CreateLabel} 0 90u 100% 40u "提示：禁止选择程序安装目录或其子目录。建议使用独立磁盘路径，或默认的用户 AppData\LabHub。"
+  ${NSD_CreateLabel} 0 90u 100% 40u "提示：禁止选择程序安装目录或其子目录。默认路径为用户 AppData\Local\LabHubData。"
   Pop $0
 
   nsDialogs::Show
 FunctionEnd
 
+; 若路径尚未以 LabHubData 结尾，则追加该子目录
+Function labhubEnsureDataSubdir
+  Exch $R0
+  Push $R1
+  Push $R2
+  ; 去掉末尾反斜杠
+  StrLen $R1 $R0
+  IntCmp $R1 0 labhub_ensure_done labhub_ensure_done 0
+  IntOp $R1 $R1 - 1
+  StrCpy $R2 $R0 1 $R1
+  StrCmp $R2 "\" 0 labhub_ensure_check
+  StrCpy $R0 $R0 $R1
+labhub_ensure_check:
+  ; 已以 LabHubData 结尾则跳过
+  StrLen $R1 $R0
+  IntCmp $R1 11 labhub_ensure_eqlen labhub_ensure_append labhub_ensure_gt
+labhub_ensure_eqlen:
+  StrCmp $R0 "LabHubData" labhub_ensure_done labhub_ensure_append
+labhub_ensure_gt:
+  StrCpy $R2 $R0 "" -11
+  StrCmp $R2 "LabHubData" 0 labhub_ensure_append
+  ; 再确认前一位是分隔符（避免 FooLabHubData 误判）
+  IntOp $R1 $R1 - 11
+  IntOp $R1 $R1 - 1
+  StrCpy $R2 $R0 1 $R1
+  StrCmp $R2 "\" labhub_ensure_done labhub_ensure_append
+labhub_ensure_append:
+  StrCpy $R0 "$R0\LabHubData"
+labhub_ensure_done:
+  Pop $R2
+  Pop $R1
+  Exch $R0
+FunctionEnd
+
 Function labhubBrowseDataDir
   ${NSD_GetText} $labhubDataDirRequest $0
-  nsDialogs::SelectFolderDialog "选择 LabHub 数据目录" $0
+  nsDialogs::SelectFolderDialog "选择父文件夹（将自动加上 LabHubData）" $0
   Pop $0
   ${If} $0 != "error"
     ${If} $0 != ""
-      StrCpy $labhubDataDir $0
+      Push $0
+      Call labhubEnsureDataSubdir
+      Pop $labhubDataDir
       ${NSD_SetText} $labhubDataDirRequest $labhubDataDir
     ${EndIf}
   ${EndIf}
@@ -108,7 +144,12 @@ Function labhubDataDirPageLeave
     Abort
   ${EndIf}
 
-  ; 拒绝盘符根
+  Push $labhubDataDir
+  Call labhubEnsureDataSubdir
+  Pop $labhubDataDir
+  ${NSD_SetText} $labhubDataDirRequest $labhubDataDir
+
+  ; 拒绝盘符根（此时应已带上 LabHubData；若仍是根则拦截）
   StrLen $0 $labhubDataDir
   IntCmp $0 2 labhub_d_root labhub_d_root labhub_d_check3
 labhub_d_root:
@@ -140,7 +181,7 @@ labhub_d_ok:
   StrCpy $2 $R9 1 $0
   StrCmp $2 "\" labhub_d_in_inst labhub_d_pass
 labhub_d_in_inst:
-  MessageBox MB_ICONSTOP|MB_OK "数据目录不能选择程序安装目录，也不能放在安装目录内部。$\r$\n请另选独立文件夹（例如 $LOCALAPPDATA\LabHub 或其它磁盘路径）。"
+  MessageBox MB_ICONSTOP|MB_OK "数据目录不能选择程序安装目录，也不能放在安装目录内部。$\r$\n请另选独立文件夹（例如 $LOCALAPPDATA\LabHubData 或其它磁盘路径）。"
   Abort
 labhub_d_pass:
 FunctionEnd

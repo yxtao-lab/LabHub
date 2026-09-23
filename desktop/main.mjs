@@ -35,13 +35,13 @@ function packagedResourceRoot() {
 }
 
 /**
- * 用户数据目录默认值：%LOCALAPPDATA%\LabHub。
+ * 用户数据目录默认值：%LOCALAPPDATA%\LabHubData。
  *
  * @returns 绝对路径
  */
 function defaultUserDataRoot() {
   const base = process.env.LOCALAPPDATA || app.getPath('appData');
-  return path.join(base, 'LabHub');
+  return path.join(base, 'LabHubData');
 }
 
 /**

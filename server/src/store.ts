@@ -23,7 +23,7 @@ export {
   isPackagedApp,
 };
 
-/** 持久化数据目录（清单 / 登录态，仍在用户 AppData） */
+/** 持久化数据目录（清单 / 登录态） */
 export const DATA_DIR = path.join(ROOT_DIR, 'data');
 
 /** 项目清单文件 */
@@ -47,7 +47,7 @@ export function ensureDirs(): void {
 
 /**
  * 将项目 path 解析为绝对路径。
- * 相对路径 `projects/...` 相对安装目录（打包后为 exe 旁的 projects）；其它相对路径相对 ROOT_DIR。
+ * 相对路径一律相对用户数据根（ROOT_DIR），与安装目录分离。
  *
  * @param projectPath - 清单中的 path 字段
  * @returns 绝对路径
@@ -55,10 +55,6 @@ export function ensureDirs(): void {
 export function resolveProjectPath(projectPath: string): string {
   if (path.isAbsolute(projectPath)) {
     return projectPath;
-  }
-  const normalized = projectPath.replace(/\\/g, '/');
-  if (normalized === 'projects' || normalized.startsWith('projects/')) {
-    return path.resolve(INSTALL_DIR, projectPath);
   }
   return path.resolve(ROOT_DIR, projectPath);
 }

@@ -235,11 +235,12 @@ export function resolveProjectsParentDir(baseDir: string): string {
 }
 
 /**
- * 按清单记录重新克隆项目到 projects/<id>，或「父目录/projects/<id>」。
+ * 按清单记录重新克隆到固定数据目录下的 projects/<id>。
+ * 打包后忽略自定义父目录（安装时选定的数据目录不可变更）。
  *
  * @param id - 项目 id
  * @param options.skipIfExists - 目录已存在则跳过并返回 null
- * @param options.targetBaseDir - 可选父目录（绝对或相对用户根）；空则用默认 projects/
+ * @param options.targetBaseDir - 仅开发态可用；打包态忽略
  * @returns 项目视图；跳过时 null
  */
 export async function restoreProjectFromCatalog(
@@ -251,7 +252,15 @@ export async function restoreProjectFromCatalog(
     throw new Error(`清单中无项目：${id}`);
   }
 
-  const baseRaw = (options.targetBaseDir || '').trim();
+  const lockDataDir =
+    process.env.LABHUB_LOCK_DATA_DIR === '1' || process.env.LABHUB_PACKAGED === '1';
+  const baseRaw = lockDataDir ? '' : (options.targetBaseDir || '').trim();
+  if (lockDataDir && options.targetBaseDir?.trim()) {
+    console.warn(
+      '[labhub] 已锁定数据目录，忽略自定义恢复路径：',
+      options.targetBaseDir,
+    );
+  }
   let absolutePath: string;
   let storedPath: string;
   if (baseRaw) {

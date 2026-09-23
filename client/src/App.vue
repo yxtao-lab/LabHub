@@ -178,10 +178,17 @@ const contextBranchesError = ref<string | null>(null);
 const showUpgrade = ref(false);
 const showPasswordModal = ref(false);
 const showAccountMenu = ref(false);
+const showSettingsModal = ref(false);
+const settingsDataDir = ref('');
+const settingsDraftDir = ref('');
+const settingsBusy = ref(false);
+const settingsMessage = ref<string | null>(null);
 const showRestoreModal = ref(false);
 const restoreSelectedIds = ref<string[]>([]);
 const restoreBaseDir = ref('');
 const restoreDefaultDir = ref('');
+const restoreInstallDir = ref('');
+const restoreDataLocked = ref(true);
 const restoreBusy = ref(false);
 const restoreRows = ref<
   Array<{
@@ -309,6 +316,42 @@ const restoreLandingHint = computed(() => {
   const parent = baseName === 'projects' ? raw : `${raw}\\projects`;
   return `${parent}\\<项目 id>`;
 });
+
+/**
+ * 规范化路径便于比较（小写、统一斜杠、去尾部分隔符）。
+ *
+ * @param value - 路径
+ * @returns 规范化字符串
+ */
+function normalizeDirPath(value: string): string {
+  return value
+    .trim()
+    .replace(/[\\/]+$/, '')
+    .replace(/\//g, '\\')
+    .toLowerCase();
+}
+
+/**
+ * 判断恢复路径是否等于或落在安装目录内。
+ *
+ * @param dirPath - 用户选择的父目录
+ * @returns 是否命中安装目录
+ */
+function isUnderInstallDir(dirPath: string): boolean {
+  const install = normalizeDirPath(restoreInstallDir.value);
+  const target = normalizeDirPath(dirPath);
+  if (!install || !target) {
+    return false;
+  }
+  return target === install || target.startsWith(`${install}\\`);
+}
+
+/**
+ * 当前恢复路径是否选到了安装目录（需警示）。
+ */
+const restorePathIsInstallDir = computed(() =>
+  isUnderInstallDir(restoreBaseDir.value),
+);
 
 /**
  * 侧栏在桌面端的宽度样式（含收起态）。
@@ -1033,6 +1076,135 @@ async function logout(): Promise<void> {
 }
 
 /**
+ * 打开设置弹窗（数据目录）。
+ *
+ * @returns {Promise<void>}
+ */
+async function openSettingsModal(): Promise<void> {
+  showAccountMenu.value = false;
+  settingsMessage.value = null;
+  settingsBusy.value = false;
+  try {
+    const data = await api<{
+      dataDir?: string;
+      projectsDir: string;
+      installDir?: string;
+    }>('/api/workspace/projects-dir');
+    settingsDataDir.value = data.dataDir || data.projectsDir.replace(/[\\/]+projects$/i, '');
+    settingsDraftDir.value = settingsDataDir.value;
+    if (data.installDir?.trim()) {
+      restoreInstallDir.value = data.installDir.trim();
+    }
+  } catch (err) {
+    settingsDataDir.value = '';
+    settingsDraftDir.value = '';
+    settingsMessage.value = err instanceof Error ? err.message : String(err);
+  }
+  showSettingsModal.value = true;
+}
+
+/**
+ * 浏览选择新的数据目录。
+ *
+ * @returns {Promise<void>}
+ */
+async function pickSettingsDataDir(): Promise<void> {
+  const desktop = (
+    window as Window & {
+      labhubDesktop?: {
+        selectDirectory?: (options?: { title?: string }) => Promise<string | null>;
+      };
+    }
+  ).labhubDesktop;
+  if (!desktop?.selectDirectory) {
+    showToast('请在桌面版中选择目录，或手动粘贴路径');
+    return;
+  }
+  const selected = await desktop.selectDirectory({ title: '选择新的数据存储目录' });
+  if (!selected) {
+    return;
+  }
+  if (isUnderInstallDir(selected)) {
+    showToast('不能选择程序安装目录或其子目录，请另选位置');
+    settingsMessage.value = `禁止使用安装目录：${restoreInstallDir.value || selected}`;
+    return;
+  }
+  settingsDraftDir.value = selected;
+  settingsMessage.value = null;
+}
+
+/**
+ * 迁移数据目录并重启应用。
+ *
+ * @returns {Promise<void>}
+ */
+async function submitMigrateDataDir(): Promise<void> {
+  const target = settingsDraftDir.value.trim();
+  if (!target) {
+    showToast('请选择新的数据目录');
+    return;
+  }
+  if (isUnderInstallDir(target)) {
+    showToast('不能选择程序安装目录或其子目录');
+    settingsMessage.value = `禁止使用安装目录：${restoreInstallDir.value || '安装目录'}`;
+    return;
+  }
+  if (
+    target.replace(/[\\/]+$/, '').toLowerCase() ===
+    settingsDataDir.value.replace(/[\\/]+$/, '').toLowerCase()
+  ) {
+    showToast('新目录与当前相同');
+    return;
+  }
+  const ok = window.confirm(
+    `将把清单与代码从：\n${settingsDataDir.value}\n\n迁移到：\n${target}\n\n迁移后会自动重启 LabHub。是否继续？`,
+  );
+  if (!ok) {
+    return;
+  }
+  settingsBusy.value = true;
+  settingsMessage.value = '正在停止进程并复制数据，请稍候…';
+  try {
+    const result = await api<{
+      ok: boolean;
+      newDataDir: string;
+      rewrittenPaths: number;
+      relaunchRequired?: boolean;
+    }>('/api/workspace/migrate-data-dir', {
+      method: 'POST',
+      body: JSON.stringify({ targetDir: target }),
+    });
+    settingsDataDir.value = result.newDataDir;
+    settingsDraftDir.value = result.newDataDir;
+    settingsMessage.value = `迁移完成（改写 ${result.rewrittenPaths} 条绝对路径），正在重启…`;
+
+    const desktop = (
+      window as Window & {
+        labhubDesktop?: {
+          persistDataDir?: (dir: string) => Promise<unknown>;
+          relaunch?: () => Promise<unknown>;
+        };
+      }
+    ).labhubDesktop;
+    if (desktop?.persistDataDir) {
+      await desktop.persistDataDir(result.newDataDir);
+    }
+    showToast('数据目录已迁移，即将重启');
+    if (desktop?.relaunch) {
+      await desktop.relaunch();
+      return;
+    }
+    showToast('请手动重启 LabHub 以使新目录生效');
+    showSettingsModal.value = false;
+  } catch (err) {
+    settingsMessage.value = err instanceof Error ? err.message : String(err);
+    showToast(settingsMessage.value);
+  } finally {
+    settingsBusy.value = false;
+  }
+}
+
+/**
  * 打开修改密码弹窗。
  *
  * @returns {void}
@@ -1089,6 +1261,31 @@ async function submitChangePassword(): Promise<void> {
 }
 
 /**
+ * 加载默认恢复目录与安装目录。
+ *
+ * @returns {Promise<void>}
+ */
+async function loadRestoreDirs(): Promise<void> {
+  try {
+    const data = await api<{
+      projectsDir: string;
+      installDir?: string;
+      dataDir?: string;
+      locked?: boolean;
+    }>('/api/workspace/projects-dir');
+    restoreDefaultDir.value = data.projectsDir;
+    restoreInstallDir.value = data.installDir?.trim() || '';
+    restoreDataLocked.value = data.locked !== false;
+    // 锁定后始终使用安装时选定的数据目录下 projects
+    restoreBaseDir.value = data.projectsDir;
+  } catch {
+    restoreDefaultDir.value = '';
+    restoreInstallDir.value = '';
+    restoreDataLocked.value = true;
+  }
+}
+
+/**
  * 打开恢复缺失弹窗，默认全选并加载默认目录。
  *
  * @returns {Promise<void>}
@@ -1108,15 +1305,7 @@ async function openRestoreModal(): Promise<void> {
     message: '等待开始',
   }));
   restoreBusy.value = false;
-  try {
-    const data = await api<{ projectsDir: string }>('/api/workspace/projects-dir');
-    restoreDefaultDir.value = data.projectsDir;
-    if (!restoreBaseDir.value.trim()) {
-      restoreBaseDir.value = data.projectsDir;
-    }
-  } catch {
-    restoreDefaultDir.value = '';
-  }
+  await loadRestoreDirs();
   showRestoreModal.value = true;
 }
 
@@ -1153,6 +1342,10 @@ function setRestoreItemChecked(id: string, checked: boolean): void {
  * @returns {Promise<void>}
  */
 async function pickRestoreBaseDir(): Promise<void> {
+  if (restoreDataLocked.value) {
+    showToast('代码拉取目录已在安装时固定，不可更改');
+    return;
+  }
   const desktop = (
     window as Window & {
       labhubDesktop?: { selectDirectory?: () => Promise<string | null> };
@@ -1162,6 +1355,9 @@ async function pickRestoreBaseDir(): Promise<void> {
     const selected = await desktop.selectDirectory();
     if (selected) {
       restoreBaseDir.value = selected;
+      if (isUnderInstallDir(selected)) {
+        showToast('你选的是 LabHub 安装目录，重装可能丢失代码，建议改用默认目录');
+      }
     }
     return;
   }
@@ -1190,17 +1386,31 @@ async function startRestoreSelected(): Promise<void> {
     showToast('请至少选择一个项目');
     return;
   }
+  if (restoreDataLocked.value) {
+    restoreBaseDir.value = restoreDefaultDir.value;
+  }
   const baseDir = restoreBaseDir.value.trim();
   if (!baseDir) {
-    showToast('请填写恢复位置');
+    showToast('数据目录未就绪，请重新安装并选择数据目录');
     return;
   }
+  if (!restoreDataLocked.value && isUnderInstallDir(baseDir)) {
+    const ok = window.confirm(
+      '当前恢复位置是 LabHub 安装目录（或安装目录内）。\n\n重装 / 卸载时可能删除这些代码。\n建议改用「默认目录」。\n\n仍要继续吗？',
+    );
+    if (!ok) {
+      return;
+    }
+  }
   restoreBusy.value = true;
-  const useDefault =
+  // 锁定数据目录时始终走默认 projects，忽略自定义父路径
+  const targetBaseDir = restoreDataLocked.value ? undefined : (
     Boolean(restoreDefaultDir.value) &&
     baseDir.replace(/[\\/]+$/, '').toLowerCase() ===
-      restoreDefaultDir.value.replace(/[\\/]+$/, '').toLowerCase();
-  const targetBaseDir = useDefault ? undefined : baseDir;
+      restoreDefaultDir.value.replace(/[\\/]+$/, '').toLowerCase()
+      ? undefined
+      : baseDir
+  );
 
   for (const id of ids) {
     const row = restoreRows.value.find((item) => item.id === id);
@@ -1262,15 +1472,7 @@ async function restoreOne(id: string): Promise<void> {
       status: 'pending' as const,
       message: '等待开始',
     }));
-  try {
-    const data = await api<{ projectsDir: string }>('/api/workspace/projects-dir');
-    restoreDefaultDir.value = data.projectsDir;
-    if (!restoreBaseDir.value.trim()) {
-      restoreBaseDir.value = data.projectsDir;
-    }
-  } catch {
-    // ignore
-  }
+  await loadRestoreDirs();
   showRestoreModal.value = true;
 }
 
@@ -2592,6 +2794,9 @@ function onGlobalKeydown(event: KeyboardEvent): void {
   closeContextMenu();
   showAccountMenu.value = false;
   repoMenuOpen.value = false;
+  if (showSettingsModal.value && !settingsBusy.value) {
+    showSettingsModal.value = false;
+  }
 }
 
 /**
@@ -3408,6 +3613,14 @@ watch(detailTab, (tab) => {
                 @click="openPasswordModal"
               >
                 修改密码
+              </button>
+              <button
+                type="button"
+                class="flex w-full items-center px-3 py-2 text-left text-[var(--text)] hover:bg-[var(--accent)]/10"
+                :disabled="busy || settingsBusy"
+                @click="openSettingsModal"
+              >
+                设置
               </button>
               <button
                 type="button"
@@ -4762,6 +4975,80 @@ watch(detailTab, (tab) => {
     </div>
 
     <div
+      v-if="showSettingsModal"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      @click.self="!settingsBusy && (showSettingsModal = false)"
+    >
+      <div class="w-full max-w-lg rounded-xl border border-[var(--line)] bg-[var(--panel)] p-5 shadow-2xl">
+        <h3 class="text-lg font-medium">设置</h3>
+        <p class="mt-1 text-sm text-[var(--muted)]">
+          修改数据存储目录后，会将清单与代码迁移到新位置，并自动重启应用。
+        </p>
+        <label class="mt-4 block text-sm">
+          当前数据目录
+          <input
+            :value="settingsDataDir"
+            type="text"
+            readonly
+            class="mt-1 w-full rounded-md border border-[var(--line)] bg-[#0b1016]/80 px-3 py-2 font-mono text-xs text-[var(--muted)] outline-none"
+          >
+        </label>
+        <label class="mt-3 block text-sm">
+          新数据目录
+          <div class="mt-1 flex flex-wrap gap-2">
+            <input
+              v-model="settingsDraftDir"
+              type="text"
+              class="min-w-0 flex-1 rounded-md border border-[var(--line)] bg-[#0b1016] px-3 py-2 font-mono text-xs outline-none focus:border-[var(--accent)]"
+              placeholder="选择或粘贴新目录"
+              :disabled="settingsBusy"
+            >
+            <button
+              type="button"
+              class="rounded-md border border-[var(--line)] px-3 py-2 text-sm text-[var(--muted)] hover:border-[var(--accent)]/40 hover:text-[var(--text)] disabled:opacity-50"
+              :disabled="settingsBusy"
+              @click="pickSettingsDataDir"
+            >
+              浏览…
+            </button>
+          </div>
+        </label>
+        <p class="mt-2 text-xs text-[var(--muted)]">
+          新目录建议为空，或已是 LabHub 数据目录。禁止选择程序安装目录及其子目录。
+        </p>
+        <p
+          v-if="settingsDraftDir.trim() && isUnderInstallDir(settingsDraftDir)"
+          class="mt-2 rounded-md border border-[var(--danger)]/40 bg-[#3a2220]/50 px-3 py-2 text-xs text-[var(--danger)]"
+        >
+          当前选择位于程序安装目录内，无法使用。请更换路径。
+        </p>
+        <p v-if="settingsMessage" class="mt-3 text-xs text-[var(--warn)]">{{ settingsMessage }}</p>
+        <div class="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            class="rounded-md border border-[var(--line)] px-3 py-2 text-sm text-[var(--muted)] hover:text-[var(--text)]"
+            :disabled="settingsBusy"
+            @click="showSettingsModal = false"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            class="rounded-md bg-[var(--accent)] px-3 py-2 text-sm font-semibold text-[#06221f] disabled:opacity-50"
+            :disabled="
+              settingsBusy ||
+              !settingsDraftDir.trim() ||
+              isUnderInstallDir(settingsDraftDir)
+            "
+            @click="submitMigrateDataDir"
+          >
+            {{ settingsBusy ? '迁移中…' : '迁移并重启' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div
       v-if="showRestoreModal"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       @click.self="!restoreBusy && (showRestoreModal = false)"
@@ -4770,49 +5057,73 @@ watch(detailTab, (tab) => {
         <div class="shrink-0 border-b border-[var(--line)] px-5 py-4">
           <h3 class="text-lg font-medium">恢复缺失项目</h3>
           <p class="mt-1 text-sm text-[var(--muted)]">
-            勾选要恢复的仓库，选择落地父目录；每个项目会克隆到「父目录 / projects / 项目 id」。
-            默认目录为安装目录下的 projects（与 LabHub.exe 同级），重装会保留该文件夹。
+            <template v-if="restoreDataLocked">
+              勾选要恢复的仓库。代码将固定克隆到安装时选定的数据目录下
+              <span class="mono">projects</span>（不可更改）。
+            </template>
+            <template v-else>
+              勾选要恢复的仓库，选择落地父目录；每个项目会克隆到「父目录 / projects / 项目 id」。
+            </template>
           </p>
         </div>
         <div class="shrink-0 space-y-3 border-b border-[var(--line)] px-5 py-4">
-          <label class="block text-sm">
-            恢复位置（父目录）
-            <div class="mt-1 flex flex-wrap gap-2">
-              <input
-                v-model="restoreBaseDir"
-                type="text"
-                class="min-w-0 flex-1 rounded-md border border-[var(--line)] bg-[#0b1016] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]"
-                placeholder="例如 D:\LabHubData（将使用 …\projects\<id>）"
-                :disabled="restoreBusy"
-              >
-              <button
-                type="button"
-                class="rounded-md border border-[var(--line)] px-3 py-2 text-sm text-[var(--muted)] hover:border-[var(--accent)]/40 hover:text-[var(--text)] disabled:opacity-50"
-                :disabled="restoreBusy"
-                @click="pickRestoreBaseDir"
-              >
-                浏览…
-              </button>
-              <button
-                v-if="restoreDefaultDir"
-                type="button"
-                class="rounded-md border border-[var(--line)] px-3 py-2 text-sm text-[var(--muted)] hover:border-[var(--accent)]/40 hover:text-[var(--text)] disabled:opacity-50"
-                :disabled="restoreBusy"
-                @click="useDefaultRestoreDir"
-              >
-                默认目录
-              </button>
-            </div>
-          </label>
-          <p v-if="restoreDefaultDir" class="text-xs text-[var(--muted)]">
-            默认（安装目录\\projects，重装保留）：{{ restoreDefaultDir }}
-          </p>
-          <p
-            v-else-if="restoreBaseDir.trim()"
-            class="text-xs text-[var(--muted)]"
-          >
-            实际落地：{{ restoreLandingHint }}
-          </p>
+          <div v-if="restoreDataLocked" class="space-y-2">
+            <p class="text-sm text-[var(--text)]">
+              固定拉取目录
+            </p>
+            <p class="mono rounded-md border border-[var(--line)] bg-[#0b1016] px-3 py-2 text-xs text-[var(--accent)]">
+              {{ restoreDefaultDir || '（未配置，请重新安装并选择数据目录）' }}
+            </p>
+            <p class="text-xs text-[var(--muted)]">
+              该路径在安装向导中选定，重装程序不会删除；如需更换请卸载后重装并重选数据目录。
+            </p>
+          </div>
+          <template v-else>
+            <label class="block text-sm">
+              恢复位置（父目录）
+              <div class="mt-1 flex flex-wrap gap-2">
+                <input
+                  v-model="restoreBaseDir"
+                  type="text"
+                  class="min-w-0 flex-1 rounded-md border border-[var(--line)] bg-[#0b1016] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]"
+                  placeholder="例如 D:\LabHubData（将使用 …\projects\<id>）"
+                  :disabled="restoreBusy"
+                >
+                <button
+                  type="button"
+                  class="rounded-md border border-[var(--line)] px-3 py-2 text-sm text-[var(--muted)] hover:border-[var(--accent)]/40 hover:text-[var(--text)] disabled:opacity-50"
+                  :disabled="restoreBusy"
+                  @click="pickRestoreBaseDir"
+                >
+                  浏览…
+                </button>
+                <button
+                  v-if="restoreDefaultDir"
+                  type="button"
+                  class="rounded-md border border-[var(--line)] px-3 py-2 text-sm text-[var(--muted)] hover:border-[var(--accent)]/40 hover:text-[var(--text)] disabled:opacity-50"
+                  :disabled="restoreBusy"
+                  @click="useDefaultRestoreDir"
+                >
+                  默认目录
+                </button>
+              </div>
+            </label>
+            <p v-if="restoreDefaultDir" class="text-xs text-[var(--muted)]">
+              默认：{{ restoreDefaultDir }}
+            </p>
+            <p
+              v-if="restorePathIsInstallDir"
+              class="rounded-md border border-[var(--warn)]/50 bg-[#3a3420]/60 px-3 py-2 text-xs text-[var(--warn)]"
+            >
+              当前路径是 LabHub 安装目录（{{ restoreInstallDir || '安装目录' }}）或其子目录。重装 / 卸载时可能丢失代码，建议点「默认目录」。
+            </p>
+            <p
+              v-else-if="restoreBaseDir.trim()"
+              class="text-xs text-[var(--muted)]"
+            >
+              实际落地：{{ restoreLandingHint }}
+            </p>
+          </template>
         </div>
         <div class="min-h-0 flex-1 overflow-y-auto px-5 py-3">
           <label class="mb-2 flex items-center gap-2 text-sm">
@@ -5106,7 +5417,7 @@ watch(detailTab, (tab) => {
       >
         <h3 class="text-lg font-medium">添加 Git 仓库</h3>
         <p class="mt-1 text-sm text-[var(--muted)]">
-          粘贴 GitHub / Gitee 地址，将浅克隆到 projects/ 下。
+          粘贴 GitHub / Gitee 地址，将浅克隆到安装时选定的数据目录下 projects/（路径固定不可改）。
         </p>
         <p
           v-if="authUser?.projectLimit != null"

@@ -49,7 +49,12 @@ FunctionEnd
 !macroend
 
 Function labhubDataDirPageCreate
-  !insertmacro MUI_HEADER_TEXT "选择数据目录" "清单、登录态与代码仓库保存在此（与程序安装目录分离，重装程序默认不删）"
+  ; 不用 MUI_HEADER_TEXT（electron-builder 包含本文件时尚无该宏）
+  GetDlgItem $0 $HWNDPARENT 1037
+  SendMessage $0 ${WM_SETTEXT} 0 "STR:选择数据目录"
+  GetDlgItem $0 $HWNDPARENT 1038
+  SendMessage $0 ${WM_SETTEXT} 0 "STR:清单、登录态与代码仓库保存在此（与程序安装目录分离，重装程序默认不删）"
+
   nsDialogs::Create 1018
   Pop $labhubDataDialog
   ${If} $labhubDataDialog == error

@@ -1467,7 +1467,9 @@ async function runAction(action: () => Promise<void>): Promise<void> {
     await action();
     await refresh();
   } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err);
+    const message = err instanceof Error ? err.message : String(err);
+    error.value = message;
+    showToast(message);
     maybeOpenUpgradeFromError(err);
   } finally {
     busy.value = false;
@@ -3316,13 +3318,6 @@ watch(detailTab, (tab) => {
         </div>
       </div>
     </header>
-
-    <div
-      v-if="error"
-      class="shrink-0 border-b border-[var(--danger)]/30 bg-[#3a2220] px-5 py-2 text-sm text-[var(--danger)]"
-    >
-      {{ error }}
-    </div>
 
     <div
       class="flex min-h-0 flex-1 flex-col lg:flex-row"

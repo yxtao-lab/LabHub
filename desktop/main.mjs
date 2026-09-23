@@ -34,13 +34,31 @@ function packagedResourceRoot() {
 }
 
 /**
- * 用户数据目录：清单与浅克隆仓库，卸载不删除。
+ * 用户数据目录：清单、登录态（卸载默认不删 AppData）。
  *
  * @returns 绝对路径
  */
 function userDataRoot() {
   const base = process.env.LOCALAPPDATA || app.getPath('appData');
   return path.join(base, 'LabHub');
+}
+
+/**
+ * 安装目录（LabHub.exe 所在目录）。
+ *
+ * @returns 绝对路径
+ */
+function installDir() {
+  return path.dirname(app.getPath('exe'));
+}
+
+/**
+ * 默认代码托管目录：安装目录下的 projects。
+ *
+ * @returns 绝对路径
+ */
+function projectsDir() {
+  return path.join(installDir(), 'projects');
 }
 
 /**
@@ -82,6 +100,8 @@ async function startBundledServer() {
   process.env.LABHUB_PACKAGED = '1';
   process.env.LABHUB_APP_ROOT = packagedResourceRoot();
   process.env.LABHUB_HOME = userDataRoot();
+  process.env.LABHUB_INSTALL_DIR = installDir();
+  process.env.LABHUB_PROJECTS_DIR = projectsDir();
   const bundlePath = path.join(packagedResourceRoot(), 'server', 'labhub.cjs');
   if (!fs.existsSync(bundlePath)) {
     throw new Error(`缺少本机服务：${bundlePath}`);

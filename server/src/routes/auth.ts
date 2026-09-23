@@ -186,7 +186,7 @@ authRouter.post('/pull-catalog', requireLocalLogin, async (_req, res, next) => {
 
 /**
  * POST /api/auth/restore/:id — 按清单重新克隆缺失项目
- * body.targetBaseDir 可选：恢复到该父目录下的 <id>
+ * body.targetBaseDir 可选：恢复到该父目录下的 projects/<id>
  */
 authRouter.post('/restore/:id', requireLocalLogin, async (req, res, next) => {
   try {
@@ -209,7 +209,7 @@ authRouter.post('/restore/:id', requireLocalLogin, async (req, res, next) => {
 /**
  * POST /api/auth/restore-missing — 批量恢复本地不存在的项目
  * body.ids 可选：只恢复指定 id；缺省为全部缺失项
- * body.targetBaseDir 可选：恢复父目录
+ * body.targetBaseDir 可选：恢复父目录（实际落到父目录/projects/<id>）
  */
 authRouter.post('/restore-missing', requireLocalLogin, async (req, res, next) => {
   try {

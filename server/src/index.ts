@@ -1,5 +1,5 @@
 import { createApp } from './app.js';
-import { isPackagedApp, ROOT_DIR } from './app-paths.js';
+import { isPackagedApp, PROJECTS_DIR, ROOT_DIR } from './app-paths.js';
 import { ensureMissingAnalyses } from './analysis-generate.js';
 import { getCloudUrl } from './auth-store.js';
 import { getDeepSeekConfig } from './analysis-deepseek.js';
@@ -59,12 +59,14 @@ function onServerReady() {
   console.log(`[labhub] 管理端 API ${consoleUrl}`);
   if (process.env.LABHUB_ELECTRON === '1') {
     if (packaged) {
-      console.log(`[labhub] 数据与仓库目录 ${ROOT_DIR}`);
+      console.log(`[labhub] 清单数据 ${ROOT_DIR}`);
+      console.log(`[labhub] 代码目录 ${PROJECTS_DIR}`);
     }
     return;
   }
   if (packaged) {
-    console.log(`[labhub] 数据与仓库目录 ${ROOT_DIR}`);
+    console.log(`[labhub] 清单数据 ${ROOT_DIR}`);
+    console.log(`[labhub] 代码目录 ${PROJECTS_DIR}`);
     void openBrowser(consoleUrl);
     return;
   }

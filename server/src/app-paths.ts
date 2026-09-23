@@ -77,8 +77,9 @@ function resolveAppRoot(): string {
 export const APP_ROOT = resolveAppRoot();
 
 /**
- * 用户可写目录：清单、登录态与浅克隆仓库。
+ * 用户可写目录：清单、登录态等元数据。
  * 打包后默认 `%LOCALAPPDATA%\\LabHub`，可用 LABHUB_HOME 覆盖。
+ * 仓库代码默认不在此目录，见 resolveProjectsDir。
  *
  * @returns 用户数据根目录
  */
@@ -94,8 +95,48 @@ export function resolveUserRoot(): string {
   return path.join(base, 'LabHub');
 }
 
-/** 清单与 projects 所在根（开发时等于仓库根） */
+/**
+ * 安装目录（LabHub.exe 所在文件夹）。
+ * Electron 通过 LABHUB_INSTALL_DIR 注入；打包兜底为 exe 所在目录。
+ *
+ * @returns 安装目录绝对路径
+ */
+export function resolveInstallDir(): string {
+  const fromEnv = (process.env.LABHUB_INSTALL_DIR || '').trim();
+  if (fromEnv) {
+    return path.resolve(fromEnv);
+  }
+  if (isPackagedApp()) {
+    return path.dirname(process.execPath);
+  }
+  return resolveUserRoot();
+}
+
+/**
+ * 默认代码托管目录：安装目录下的 projects。
+ * 可用 LABHUB_PROJECTS_DIR 覆盖；开发态仍为仓库根下的 projects。
+ *
+ * @returns projects 绝对路径
+ */
+export function resolveProjectsDir(): string {
+  const fromEnv = (process.env.LABHUB_PROJECTS_DIR || '').trim();
+  if (fromEnv) {
+    return path.resolve(fromEnv);
+  }
+  if (isPackagedApp()) {
+    return path.join(resolveInstallDir(), 'projects');
+  }
+  return path.join(resolveUserRoot(), 'projects');
+}
+
+/** 清单与登录态所在根（开发时等于仓库根） */
 export const ROOT_DIR = resolveUserRoot();
+
+/** 安装目录（开发时等于仓库根） */
+export const INSTALL_DIR = resolveInstallDir();
+
+/** 默认浅克隆 / 恢复落地目录 */
+export const PROJECTS_DIR = resolveProjectsDir();
 
 /** 控制台静态资源目录 */
 export const CLIENT_DIST_DIR = isPackagedApp()

@@ -7,7 +7,7 @@ import { billingRouter } from './routes/billing.js';
 import { categoriesRouter } from './routes/categories.js';
 import { projectsRouter } from './routes/projects.js';
 import { workspaceRouter } from './routes/workspace.js';
-import { CLIENT_DIST_DIR, ROOT_DIR } from './store.js';
+import { CLIENT_DIST_DIR, PROJECTS_DIR, ROOT_DIR } from './store.js';
 
 /**
  * 创建 Express 应用：API + 生产态静态控制台。
@@ -20,7 +20,12 @@ export function createApp() {
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, name: 'labhub', root: ROOT_DIR });
+    res.json({
+      ok: true,
+      name: 'labhub',
+      root: ROOT_DIR,
+      projectsDir: PROJECTS_DIR,
+    });
   });
 
   app.use('/api/auth', authRouter);

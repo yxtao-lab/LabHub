@@ -3,6 +3,8 @@ import path from 'node:path';
 import type { CatalogCategory, CatalogPayload, CatalogProject } from './cloud-client.js';
 import { toCatalogProject, cloudPutCatalog } from './cloud-client.js';
 import { getAuthToken } from './auth-store.js';
+import { hasProjectAnalysis } from './analysis.js';
+import { generateProjectAnalysis } from './analysis-generate.js';
 import { cloneRepository } from './git.js';
 import { normalizeProjectRecord } from './profiles.js';
 import { refreshRecordProfiles } from './package-profiles.js';
@@ -215,7 +217,25 @@ export async function pushCatalogIfLoggedIn(): Promise<void> {
 }
 
 /**
- * 按清单记录重新克隆项目到 projects/<id>，或自定义父目录下的 <id>。
+ * 将用户选择的恢复父目录规范为「…/projects」。
+ * 若已以 projects 结尾则不再套一层，避免 projects/projects。
+ *
+ * @param baseDir - 用户选择或默认的父目录
+ * @returns 实际用于放置各仓库的目录
+ */
+export function resolveProjectsParentDir(baseDir: string): string {
+  const normalized = path.normalize(baseDir.trim());
+  if (!normalized) {
+    return PROJECTS_DIR;
+  }
+  if (path.basename(normalized).toLowerCase() === 'projects') {
+    return normalized;
+  }
+  return path.join(normalized, 'projects');
+}
+
+/**
+ * 按清单记录重新克隆项目到 projects/<id>，或「父目录/projects/<id>」。
  *
  * @param id - 项目 id
  * @param options.skipIfExists - 目录已存在则跳过并返回 null
@@ -241,8 +261,9 @@ export async function restoreProjectFromCatalog(
     if (baseDir === path.parse(baseDir).root) {
       throw new Error('恢复位置不能是磁盘根目录，请选择具体文件夹');
     }
-    fs.mkdirSync(baseDir, { recursive: true });
-    absolutePath = path.join(baseDir, record.id);
+    const projectsParent = resolveProjectsParentDir(baseDir);
+    fs.mkdirSync(projectsParent, { recursive: true });
+    absolutePath = path.join(projectsParent, record.id);
     storedPath = absolutePath;
   } else {
     absolutePath = path.join(PROJECTS_DIR, record.id);
@@ -278,6 +299,16 @@ export async function restoreProjectFromCatalog(
   ) ?? { ...next, branch: cloned.branch };
   upsertProject(withProfiles);
   syncCursorWorkspaceFile();
+  if (!hasProjectAnalysis(withProfiles.path)) {
+    try {
+      generateProjectAnalysis(withProfiles, { force: false });
+    } catch (error) {
+      console.warn(
+        `[labhub] 恢复后生成本地分析失败：${withProfiles.id}`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
   return toProjectView(withProfiles);
 }
 

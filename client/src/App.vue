@@ -296,6 +296,21 @@ const selected = computed(
 );
 
 /**
+ * 自定义恢复父目录时的实际落地提示。
+ *
+ * @returns 展示文案
+ */
+const restoreLandingHint = computed(() => {
+  const raw = restoreBaseDir.value.trim().replace(/[\\/]+$/, '');
+  if (!raw) {
+    return '';
+  }
+  const baseName = raw.split(/[\\/]/).pop()?.toLowerCase() ?? '';
+  const parent = baseName === 'projects' ? raw : `${raw}\\projects`;
+  return `${parent}\\<项目 id>`;
+});
+
+/**
  * 侧栏在桌面端的宽度样式（含收起态）。
  *
  * @returns CSS 变量与宽度对象
@@ -1500,7 +1515,9 @@ async function refreshAnalysis(id: string): Promise<void> {
   } catch (err) {
     analysis.value = null;
     analysisHtml.value = '';
-    error.value = err instanceof Error ? err.message : String(err);
+    const message = err instanceof Error ? err.message : String(err);
+    error.value = message;
+    showToast(message);
   } finally {
     analysisLoading.value = false;
   }
@@ -3100,6 +3117,9 @@ watch(detailTab, (tab) => {
   }
   if (tab === 'repo') {
     void refreshRepoHistory(selectedId.value);
+  }
+  if (tab === 'analysis') {
+    void refreshAnalysis(selectedId.value);
   }
 });
 </script>
@@ -4750,7 +4770,8 @@ watch(detailTab, (tab) => {
         <div class="shrink-0 border-b border-[var(--line)] px-5 py-4">
           <h3 class="text-lg font-medium">恢复缺失项目</h3>
           <p class="mt-1 text-sm text-[var(--muted)]">
-            勾选要恢复的仓库，选择落地父目录；每个项目会克隆到「父目录 / 项目 id」。
+            勾选要恢复的仓库，选择落地父目录；每个项目会克隆到「父目录 / projects / 项目 id」。
+            默认目录为安装目录下的 projects（与 LabHub.exe 同级），重装会保留该文件夹。
           </p>
         </div>
         <div class="shrink-0 space-y-3 border-b border-[var(--line)] px-5 py-4">
@@ -4761,7 +4782,7 @@ watch(detailTab, (tab) => {
                 v-model="restoreBaseDir"
                 type="text"
                 class="min-w-0 flex-1 rounded-md border border-[var(--line)] bg-[#0b1016] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]"
-                placeholder="例如 D:\LabHubProjects"
+                placeholder="例如 D:\LabHubData（将使用 …\projects\<id>）"
                 :disabled="restoreBusy"
               >
               <button
@@ -4784,7 +4805,13 @@ watch(detailTab, (tab) => {
             </div>
           </label>
           <p v-if="restoreDefaultDir" class="text-xs text-[var(--muted)]">
-            默认：{{ restoreDefaultDir }}
+            默认（安装目录\\projects，重装保留）：{{ restoreDefaultDir }}
+          </p>
+          <p
+            v-else-if="restoreBaseDir.trim()"
+            class="text-xs text-[var(--muted)]"
+          >
+            实际落地：{{ restoreLandingHint }}
           </p>
         </div>
         <div class="min-h-0 flex-1 overflow-y-auto px-5 py-3">

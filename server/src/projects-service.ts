@@ -14,6 +14,7 @@ import {
   deriveProjectId,
   isGitRepo,
   listProjectBranches,
+  listRepoHistory,
   mergeBranch,
   pullOrigin,
   readGitSummary,
@@ -1382,6 +1383,28 @@ export async function listBranchesForProject(id: string): Promise<{
     throw new Error(`项目目录不存在：${absolutePath}`);
   }
   return listProjectBranches(absolutePath);
+}
+
+/**
+ * 读取项目分支链与近期提交记录。
+ *
+ * @param id - 项目 id
+ * @param limit - 提交条数
+ * @returns 历史视图
+ */
+export async function getRepoHistoryForProject(id: string, limit = 40) {
+  const current = findProject(id);
+  if (!current) {
+    throw new Error(`项目不存在：${id}`);
+  }
+  const absolutePath = resolveProjectPath(current.path);
+  if (!fs.existsSync(absolutePath)) {
+    throw new Error(`项目目录不存在：${absolutePath}`);
+  }
+  if (!isGitRepo(absolutePath)) {
+    throw new Error(`不是 Git 仓库：${absolutePath}`);
+  }
+  return listRepoHistory(absolutePath, limit);
 }
 
 /**

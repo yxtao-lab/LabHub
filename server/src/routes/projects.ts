@@ -18,6 +18,7 @@ import {
   listBranchesForProject,
   listProjectViews,
   mergeProjectBranch,
+  getRepoHistoryForProject,
   runCustomCommand,
   runCustomCommandSchema,
   startProject,
@@ -417,6 +418,19 @@ projectsRouter.get('/:id/branches', async (req, res, next) => {
   try {
     const result = await listBranchesForProject(req.params.id);
     res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/projects/:id/repo-history?limit= — 分支链 + 近期提交
+ */
+projectsRouter.get('/:id/repo-history', async (req, res, next) => {
+  try {
+    const limit = Number(req.query.limit ?? 40);
+    const history = await getRepoHistoryForProject(req.params.id, limit);
+    res.json({ history });
   } catch (error) {
     next(error);
   }

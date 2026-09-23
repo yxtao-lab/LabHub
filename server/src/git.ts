@@ -479,6 +479,140 @@ export async function listProjectBranches(cwd: string): Promise<{
   return { current, branches };
 }
 
+/** 仓库提交摘要 */
+export type RepoCommitSummary = {
+  hash: string;
+  shortHash: string;
+  parents: string[];
+  author: string;
+  date: string;
+  subject: string;
+  refs: string[];
+};
+
+/** 仓库历史视图（分支 + 提交链） */
+export type RepoHistoryView = {
+  current: string | null;
+  branches: string[];
+  ahead: number | null;
+  behind: number | null;
+  commits: RepoCommitSummary[];
+  graphLines: string[];
+};
+
+/**
+ * 解析 git log --decorate 的 refs 字段。
+ *
+ * @param raw - 如 `HEAD -> master, origin/master, tag: v1`
+ * @returns 引用名列表
+ */
+function parseDecorateRefs(raw: string): string[] {
+  const trimmed = raw.trim().replace(/^\(|\)$/g, '');
+  if (!trimmed) {
+    return [];
+  }
+  return trimmed
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => part.replace(/^tag:\s*/, 'tag:'));
+}
+
+/**
+ * 读取分支列表、相对 origin 的 ahead/behind，以及近期提交链。
+ *
+ * @param cwd - 仓库目录
+ * @param limit - 提交条数上限
+ * @returns 历史视图
+ * @throws {Error} 非仓库时抛出
+ */
+export async function listRepoHistory(
+  cwd: string,
+  limit = 40,
+): Promise<RepoHistoryView> {
+  if (!isGitRepo(cwd)) {
+    throw new Error(`不是 Git 仓库：${cwd}`);
+  }
+  const safeLimit = Math.min(Math.max(Math.floor(limit) || 40, 5), 120);
+  const { current, branches } = await listProjectBranches(cwd);
+
+  let ahead: number | null = null;
+  let behind: number | null = null;
+  if (current) {
+    const upstream = await git(cwd, [
+      'rev-parse',
+      '--abbrev-ref',
+      '--symbolic-full-name',
+      '@{upstream}',
+    ]);
+    const track =
+      upstream.code === 0 && upstream.stdout
+        ? upstream.stdout
+        : `origin/${current}`;
+    const counts = await git(cwd, [
+      'rev-list',
+      '--left-right',
+      '--count',
+      `HEAD...${track}`,
+    ]);
+    if (counts.code === 0) {
+      const parts = counts.stdout.trim().split(/\s+/);
+      if (parts.length >= 2) {
+        ahead = Number(parts[0]) || 0;
+        behind = Number(parts[1]) || 0;
+      }
+    }
+  }
+
+  const log = await git(cwd, [
+    'log',
+    '--all',
+    '--date-order',
+    `--max-count=${safeLimit}`,
+    '--pretty=format:%H%x09%h%x09%P%x09%an%x09%aI%x09%d%x09%s',
+  ]);
+  const commits: RepoCommitSummary[] = [];
+  if (log.code === 0 && log.stdout.trim()) {
+    for (const line of log.stdout.split(/\r?\n/)) {
+      if (!line.trim()) {
+        continue;
+      }
+      const parts = line.split('\t');
+      if (parts.length < 7) {
+        continue;
+      }
+      const [hash, shortHash, parentsRaw, author, date, decorate, ...subjectParts] =
+        parts;
+      commits.push({
+        hash,
+        shortHash,
+        parents: parentsRaw ? parentsRaw.split(' ').filter(Boolean) : [],
+        author,
+        date,
+        subject: subjectParts.join('\t'),
+        refs: parseDecorateRefs(decorate),
+      });
+    }
+  }
+
+  const graph = await git(cwd, [
+    'log',
+    '--graph',
+    '--decorate',
+    '--all',
+    '--date-order',
+    `--max-count=${safeLimit}`,
+    '--date=format:%m-%d %H:%M',
+    '--pretty=format:%h %ad %s',
+  ]);
+  const graphLines =
+    graph.code === 0 && graph.stdout.trim()
+      ? graph.stdout.split(/\r?\n/).filter((line) => line.length > 0)
+      : [];
+
+  return { current, branches, ahead, behind, commits, graphLines };
+}
+
 /**
  * 校验分支名，避免注入异常 ref。
  *
@@ -603,7 +737,8 @@ export async function checkoutProjectBranch(
 }
 
 /**
- * 拉取 origin 指定分支（快进）。
+ * 拉取 origin 指定分支并快进合并到当前 HEAD。
+ * 不用 `--depth 1`，避免浅历史导致 “unrelated histories”。
  *
  * @param cwd - 仓库目录
  * @param branch - 分支名
@@ -615,10 +750,47 @@ export async function pullOrigin(
   branch: string,
 ): Promise<{ stdout: string; stderr: string }> {
   const target = assertSafeBranchName(branch);
-  await fetchOriginBranch(cwd, target);
+  await ensureOriginFetchesAllHeads(cwd);
+
+  const fetch = await git(cwd, [
+    'fetch',
+    'origin',
+    `+refs/heads/${target}:refs/remotes/origin/${target}`,
+  ]);
+  if (fetch.code !== 0) {
+    throw new Error(`拉取分支 ${target} 失败：${fetch.stderr || fetch.stdout}`);
+  }
+
+  const shallow = await git(cwd, ['rev-parse', '--is-shallow-repository']);
+  if (shallow.stdout.trim() === 'true') {
+    const base = await git(cwd, ['merge-base', 'HEAD', `origin/${target}`]);
+    if (base.code !== 0) {
+      const deepen = await git(cwd, ['fetch', '--unshallow', 'origin']);
+      if (deepen.code !== 0) {
+        const retry = await git(cwd, ['fetch', '--deepen=100', 'origin']);
+        if (retry.code !== 0) {
+          throw new Error(
+            `浅克隆历史不完整，无法与 origin/${target} 对齐：${deepen.stderr || retry.stderr || deepen.stdout}`,
+          );
+        }
+      }
+    }
+  }
+
   const merge = await git(cwd, ['merge', '--ff-only', `origin/${target}`]);
   if (merge.code !== 0) {
-    throw new Error(`快进合并失败：${merge.stderr || merge.stdout}`);
+    const detail = (merge.stderr || merge.stdout || '').trim();
+    if (/local changes|would be overwritten|uncommitted/i.test(detail)) {
+      throw new Error(
+        `无法拉取：本地有未提交改动会被覆盖。请先「Stash」或「提交代码」后再拉取。\n${detail}`,
+      );
+    }
+    if (/Not possible to fast-forward|divergent|unrelated histories|拒绝合并/i.test(detail)) {
+      throw new Error(
+        `无法快进合并：本地与远程已分叉。可先 Stash/提交，再用「Merge」处理，或切到干净工作区后重试。\n${detail}`,
+      );
+    }
+    throw new Error(`快进合并失败：${detail || '未知错误'}`);
   }
   return { stdout: merge.stdout, stderr: merge.stderr };
 }

@@ -19,6 +19,27 @@ type UpgradeReason = 'project' | 'ai' | 'general';
 type BillingCycle = 'monthly' | 'yearly';
 type LegalDocKind = 'terms' | 'privacy';
 
+/** 仓库提交摘要（与服务端 RepoCommitSummary 对齐） */
+type RepoCommitSummary = {
+  hash: string;
+  shortHash: string;
+  parents: string[];
+  author: string;
+  date: string;
+  subject: string;
+  refs: string[];
+};
+
+/** 仓库历史视图 */
+type RepoHistoryView = {
+  current: string | null;
+  branches: string[];
+  ahead: number | null;
+  behind: number | null;
+  commits: RepoCommitSummary[];
+  graphLines: string[];
+};
+
 /** 侧栏分组：一个分类及其项目 */
 type ProjectGroup = {
   id: string;
@@ -242,8 +263,12 @@ const categoryIdDraft = ref('');
 /** 按项目名称下拉筛选：存项目 id；空字符串表示全部 */
 const nameFilterId = ref('');
 const logPanel = ref<HTMLElement | null>(null);
+const repoLogPanel = ref<HTMLElement | null>(null);
 const detailTab = ref<DetailTab>('logs');
 const repoMenuOpen = ref(false);
+const repoHistory = ref<RepoHistoryView | null>(null);
+const repoHistoryLoading = ref(false);
+const repoHistoryError = ref<string | null>(null);
 const analysis = ref<ProjectAnalysis | null>(null);
 const analysisLoading = ref(false);
 const analysisHtml = ref('');
@@ -1369,19 +1394,63 @@ async function refreshLogs(id: string): Promise<void> {
     const data = await api<{ logs: LogLine[] }>(
       `/api/projects/${id}/logs?${query.toString()}`,
     );
+    const panel =
+      detailTab.value === 'repo' ? repoLogPanel.value : logPanel.value;
     const nearBottom =
-      !logPanel.value ||
-      logPanel.value.scrollHeight - logPanel.value.scrollTop - logPanel.value.clientHeight < 80;
+      !panel ||
+      panel.scrollHeight - panel.scrollTop - panel.clientHeight < 80;
     logs.value = data.logs;
     if (nearBottom) {
       await nextTick();
-      if (logPanel.value) {
-        logPanel.value.scrollTop = logPanel.value.scrollHeight;
+      const active =
+        detailTab.value === 'repo' ? repoLogPanel.value : logPanel.value;
+      if (active) {
+        active.scrollTop = active.scrollHeight;
       }
     }
   } catch {
     // 轮询时忽略瞬时错误
   }
+}
+
+/**
+ * 拉取仓库分支链与近期提交。
+ *
+ * @param id - 项目 id
+ * @returns {Promise<void>}
+ */
+async function refreshRepoHistory(id: string): Promise<void> {
+  if (!id) {
+    return;
+  }
+  repoHistoryLoading.value = true;
+  try {
+    const data = await api<{ history: RepoHistoryView }>(
+      `/api/projects/${id}/repo-history?limit=50`,
+    );
+    repoHistory.value = data.history;
+    repoHistoryError.value = null;
+  } catch (err) {
+    repoHistory.value = null;
+    repoHistoryError.value =
+      err instanceof Error ? err.message : String(err);
+  } finally {
+    repoHistoryLoading.value = false;
+  }
+}
+
+/**
+ * 格式化提交时间为短文案。
+ *
+ * @param iso - ISO 时间
+ * @returns 展示文案
+ */
+function formatCommitDate(iso: string): string {
+  if (!iso) {
+    return '';
+  }
+  const normalized = iso.replace('T', ' ').slice(0, 16);
+  return normalized;
 }
 
 /**
@@ -1946,6 +2015,7 @@ async function runRepoGitAction(
   closeContextMenu();
   await runAction(runner);
   await refreshLogs(projectId);
+  await refreshRepoHistory(projectId);
 }
 
 /**
@@ -2228,6 +2298,7 @@ async function checkoutContextBranch(branchName: string): Promise<void> {
     await checkoutBranchWithProgress(project.id, branchName);
     await refresh();
     await refreshLogs(project.id);
+    await refreshRepoHistory(project.id);
     showToast(`已切换到分支 ${branchName}`);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -2976,6 +3047,8 @@ watch(
     }
     analysis.value = null;
     analysisHtml.value = '';
+    repoHistory.value = null;
+    repoHistoryError.value = null;
     logProfileId.value = null;
     if (!id) {
       logs.value = [];
@@ -2992,7 +3065,12 @@ watch(
     detailTab.value = project?.hasAnalysis ? 'analysis' : 'logs';
     void refreshLogs(id);
     void refreshAnalysis(id);
-    logsTimer = window.setInterval(() => void refreshLogs(id), 2000);
+    logsTimer = window.setInterval(() => {
+      void refreshLogs(id);
+      if (detailTab.value === 'repo') {
+        void refreshRepoHistory(id);
+      }
+    }, 2000);
   },
   { immediate: true },
 );
@@ -3014,8 +3092,14 @@ watch(logProfileId, () => {
 });
 
 watch(detailTab, (tab) => {
-  if (selectedId.value && (tab === 'logs' || tab === 'repo')) {
+  if (!selectedId.value) {
+    return;
+  }
+  if (tab === 'logs' || tab === 'repo') {
     void refreshLogs(selectedId.value);
+  }
+  if (tab === 'repo') {
+    void refreshRepoHistory(selectedId.value);
   }
 });
 </script>
@@ -4418,17 +4502,11 @@ watch(detailTab, (tab) => {
             </div>
 
             <div
-              v-show="detailTab === 'logs' || detailTab === 'repo'"
+              v-show="detailTab === 'logs'"
               ref="logPanel"
               class="mono min-h-0 flex-1 overflow-auto rounded-lg border border-[var(--line)] bg-[#0b1016] p-3 text-xs leading-5"
             >
-              <span v-if="logs.length === 0" class="text-[var(--muted)]">
-                {{
-                  detailTab === 'repo'
-                    ? '暂无仓库操作日志。可通过顶部「仓库」菜单或侧栏右键执行拉取 / 提交 / stash / merge。'
-                    : '暂无日志'
-                }}
-              </span>
+              <span v-if="logs.length === 0" class="text-[var(--muted)]">暂无日志</span>
               <div
                 v-for="(line, index) in logs"
                 :key="`${line.ts}-${index}`"
@@ -4448,6 +4526,119 @@ watch(detailTab, (tab) => {
                   >{{ part.value }}</a>
                   <span v-else>{{ part.value }}</span>
                 </template>
+              </div>
+            </div>
+
+            <div
+              v-show="detailTab === 'repo'"
+              class="flex min-h-0 flex-1 flex-col gap-3 lg:flex-row"
+            >
+              <div
+                ref="repoLogPanel"
+                class="mono min-h-0 flex-1 overflow-auto rounded-lg border border-[var(--line)] bg-[#0b1016] p-3 text-xs leading-5 lg:max-w-[42%]"
+              >
+                <span v-if="logs.length === 0" class="text-[var(--muted)]">
+                  暂无仓库操作日志。可通过顶部「仓库」菜单或侧栏右键执行拉取 / 提交 / stash / merge。
+                </span>
+                <div
+                  v-for="(line, index) in logs"
+                  :key="`${line.ts}-${index}`"
+                  class="whitespace-pre-wrap break-words"
+                  :class="logClass(line.stream)"
+                >
+                  <span class="text-[var(--muted)]">{{ line.ts.slice(11, 19) }} </span>
+                  <span>{{ line.text }}</span>
+                </div>
+              </div>
+
+              <div
+                class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-[var(--line)] bg-[#0b1016]"
+              >
+                <div
+                  class="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--line)] px-3 py-2"
+                >
+                  <span class="text-xs font-medium text-[var(--text)]">分支链 · 提交</span>
+                  <span
+                    v-if="repoHistory?.current"
+                    class="mono rounded border border-[var(--accent)]/40 bg-[var(--accent)]/10 px-1.5 py-0.5 text-[10px] text-[var(--accent)]"
+                  >
+                    {{ repoHistory.current }}
+                  </span>
+                  <span
+                    v-if="repoHistory && (repoHistory.ahead != null || repoHistory.behind != null)"
+                    class="text-[10px] text-[var(--muted)]"
+                  >
+                    <template v-if="(repoHistory.ahead ?? 0) > 0">↑{{ repoHistory.ahead }} </template>
+                    <template v-if="(repoHistory.behind ?? 0) > 0">↓{{ repoHistory.behind }}</template>
+                    <template v-if="!(repoHistory.ahead || repoHistory.behind)">与远程同步</template>
+                  </span>
+                  <button
+                    type="button"
+                    class="ml-auto rounded border border-[var(--line)] px-2 py-0.5 text-[10px] text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-40"
+                    :disabled="repoHistoryLoading || !selectedId"
+                    @click="selectedId && refreshRepoHistory(selectedId)"
+                  >
+                    {{ repoHistoryLoading ? '刷新中…' : '刷新' }}
+                  </button>
+                </div>
+
+                <div
+                  v-if="repoHistory?.branches?.length"
+                  class="flex shrink-0 flex-wrap gap-1.5 border-b border-[var(--line)] px-3 py-2"
+                >
+                  <span
+                    v-for="branch in repoHistory.branches"
+                    :key="branch"
+                    class="mono rounded px-1.5 py-0.5 text-[10px]"
+                    :class="
+                      branch === repoHistory.current
+                        ? 'bg-[var(--accent)]/20 text-[var(--accent)]'
+                        : 'bg-white/5 text-[var(--muted)]'
+                    "
+                  >
+                    {{ branch }}
+                  </span>
+                </div>
+
+                <div class="min-h-0 flex-1 overflow-auto p-3">
+                  <p v-if="repoHistoryLoading && !repoHistory" class="text-xs text-[var(--muted)]">
+                    正在读取分支与提交…
+                  </p>
+                  <p v-else-if="repoHistoryError" class="text-xs text-[var(--warn)]">
+                    {{ repoHistoryError }}
+                  </p>
+                  <template v-else-if="repoHistory">
+                    <pre
+                      v-if="repoHistory.graphLines.length"
+                      class="mono mb-3 whitespace-pre-wrap break-all text-[11px] leading-5 text-[var(--text)]/90"
+                    >{{ repoHistory.graphLines.join('\n') }}</pre>
+                    <div v-if="repoHistory.commits.length" class="space-y-2">
+                      <div
+                        v-for="commit in repoHistory.commits"
+                        :key="commit.hash"
+                        class="rounded border border-[var(--line)]/80 bg-[#0e141c] px-2.5 py-2"
+                      >
+                        <div class="flex flex-wrap items-center gap-2">
+                          <span class="mono text-[11px] text-[var(--accent)]">{{ commit.shortHash }}</span>
+                          <span class="text-[10px] text-[var(--muted)]">{{ formatCommitDate(commit.date) }}</span>
+                          <span class="text-[10px] text-[var(--muted)]">{{ commit.author }}</span>
+                        </div>
+                        <p class="mt-1 text-xs leading-5 text-[var(--text)]">{{ commit.subject }}</p>
+                        <div v-if="commit.refs.length" class="mt-1.5 flex flex-wrap gap-1">
+                          <span
+                            v-for="refName in commit.refs"
+                            :key="refName"
+                            class="mono rounded bg-white/5 px-1 py-0.5 text-[10px] text-[var(--muted)]"
+                          >
+                            {{ refName }}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    <p v-else class="text-xs text-[var(--muted)]">暂无提交记录</p>
+                  </template>
+                  <p v-else class="text-xs text-[var(--muted)]">选择 Git 仓库后显示分支链与提交。</p>
+                </div>
               </div>
             </div>
 

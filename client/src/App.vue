@@ -347,20 +347,24 @@ function isUnderInstallDir(dirPath: string): boolean {
 }
 
 /**
- * 选目录后自动带上 LabHubData 子目录（已有则不重复追加）。
+ * 规范化数据目录：去掉多余的 LabHubData 套娃后只保留一层。
  *
- * @param dirPath - 用户选择的父目录或完整数据目录
- * @returns 带 LabHubData 的绝对路径风格字符串
+ * @param dirPath - 用户选择的父目录或已带 LabHubData 的路径
+ * @returns 形如 …\LabHubData 的路径
  */
 function ensureLabHubDataSubdir(dirPath: string): string {
-  const trimmed = dirPath.trim().replace(/[\\/]+$/, '');
+  let trimmed = dirPath.trim().replace(/[\\/]+$/, '');
   if (!trimmed) {
     return trimmed;
   }
-  if (/[\\/]LabHubData$/i.test(trimmed) || /^LabHubData$/i.test(trimmed)) {
-    return trimmed;
-  }
   const sep = trimmed.includes('/') && !trimmed.includes('\\') ? '/' : '\\';
+  // 反复剥掉末尾 LabHubData，避免浏览/提交多次时越套越深
+  while (/[\\/]LabHubData$/i.test(trimmed) || /^LabHubData$/i.test(trimmed)) {
+    trimmed = trimmed.replace(/[\\/]?LabHubData$/i, '').replace(/[\\/]+$/, '');
+  }
+  if (!trimmed) {
+    return `LabHubData`;
+  }
   return `${trimmed}${sep}LabHubData`;
 }
 

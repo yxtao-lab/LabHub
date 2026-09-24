@@ -89,35 +89,42 @@ Function labhubDataDirPageCreate
   nsDialogs::Show
 FunctionEnd
 
-; 若路径尚未以 LabHubData 结尾，则追加该子目录
+; 规范化数据目录：去掉多余的 LabHubData 套娃后，只保留一层
+; （LabHubData 长度为 10；旧逻辑误用 11 会导致每次浏览都再套一层）
 Function labhubEnsureDataSubdir
   Exch $R0
   Push $R1
   Push $R2
-  ; 去掉末尾反斜杠
+labhub_ensure_trim:
   StrLen $R1 $R0
-  IntCmp $R1 0 labhub_ensure_done labhub_ensure_done 0
+  IntCmp $R1 0 labhub_ensure_append labhub_ensure_append 0
   IntOp $R1 $R1 - 1
   StrCpy $R2 $R0 1 $R1
-  StrCmp $R2 "\" 0 labhub_ensure_check
+  StrCmp $R2 "\" 0 labhub_ensure_strip_loop
   StrCpy $R0 $R0 $R1
-labhub_ensure_check:
-  ; 已以 LabHubData 结尾则跳过
+  Goto labhub_ensure_trim
+labhub_ensure_strip_loop:
   StrLen $R1 $R0
-  IntCmp $R1 11 labhub_ensure_eqlen labhub_ensure_append labhub_ensure_gt
-labhub_ensure_eqlen:
-  StrCmp $R0 "LabHubData" labhub_ensure_done labhub_ensure_append
+  IntCmp $R1 10 labhub_ensure_eq labhub_ensure_append labhub_ensure_gt
+labhub_ensure_eq:
+  StrCmp $R0 "LabHubData" 0 labhub_ensure_append
+  StrCpy $R0 ""
+  Goto labhub_ensure_append
 labhub_ensure_gt:
-  StrCpy $R2 $R0 "" -11
+  StrCpy $R2 $R0 "" -10
   StrCmp $R2 "LabHubData" 0 labhub_ensure_append
-  ; 再确认前一位是分隔符（避免 FooLabHubData 误判）
-  IntOp $R1 $R1 - 11
+  IntOp $R1 $R1 - 10
   IntOp $R1 $R1 - 1
   StrCpy $R2 $R0 1 $R1
-  StrCmp $R2 "\" labhub_ensure_done labhub_ensure_append
+  StrCmp $R2 "\" 0 labhub_ensure_append
+  ; 剥掉一层 \LabHubData，继续剥，避免套娃
+  StrCpy $R0 $R0 $R1
+  Goto labhub_ensure_trim
 labhub_ensure_append:
+  StrCmp $R0 "" 0 labhub_ensure_join
+  StrCpy $R0 "$LOCALAPPDATA"
+labhub_ensure_join:
   StrCpy $R0 "$R0\LabHubData"
-labhub_ensure_done:
   Pop $R2
   Pop $R1
   Exch $R0

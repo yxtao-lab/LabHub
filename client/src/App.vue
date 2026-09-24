@@ -624,7 +624,7 @@ function showToast(message: string): void {
   toastTimer = window.setTimeout(() => {
     toastMessage.value = null;
     toastTimer = undefined;
-  }, 2200);
+  }, 3200);
 }
 
 /**
@@ -1471,9 +1471,12 @@ async function startRestoreSelected(): Promise<void> {
   const failed = restoreRows.value.filter((item) => item.status === 'error');
   const done = restoreRows.value.filter((item) => item.status === 'done');
   if (failed.length === 0 && done.length > 0) {
-    showToast(`已恢复 ${done.length} 个项目`);
+    showRestoreModal.value = false;
+    showToast(`恢复成功：已克隆 ${done.length} 个项目`);
+  } else if (failed.length > 0 && done.length > 0) {
+    showToast(`部分恢复成功：成功 ${done.length} 个，失败 ${failed.length} 个`);
   } else if (failed.length > 0) {
-    error.value = `部分恢复失败：${failed.map((item) => `${item.name}(${item.message})`).join('；')}`;
+    showToast(`恢复失败：${failed.map((item) => item.name).join('、')}`);
   }
 }
 
@@ -2216,6 +2219,7 @@ async function submitAdd(event: Event): Promise<void> {
       categoryId: categoryIdInput.value || null,
       skipInstall: true,
     });
+    stopAddProgress();
     showAdd.value = false;
     repoUrl.value = '';
     openUrl.value = '';
@@ -2225,9 +2229,9 @@ async function submitAdd(event: Event): Promise<void> {
     startCommand.value = '';
     branch.value = '';
     selectedId.value = data.id;
+    showToast(`克隆成功：${data.name || data.id}（请先安装依赖，再启动或构建）`);
     await refreshAuth();
     await refresh();
-    showToast('登记成功：请先安装依赖，再启动或构建');
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     addError.value = message;

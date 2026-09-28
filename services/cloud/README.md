@@ -22,6 +22,7 @@ cd services/cloud
 cp .env.example .env
 # 必填 JWT_SECRET、DATABASE_URL
 # 开发可用 SMS_PROVIDER=dev + SMS_DEV_CODE
+# 生产真实短信：SMS_PROVIDER=aliyun，并填写 AccessKey / 签名 / 模板（见 .env.example）
 
 # 本地 PostgreSQL（自动建库用户；应用启动时自动建表）
 docker compose up -d

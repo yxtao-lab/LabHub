@@ -8,6 +8,53 @@ const IP_WINDOW_MS = 60 * 60 * 1000;
 const IP_MAX_PER_WINDOW = 20;
 
 /**
+ * 读取当前短信通道名（小写）。
+ *
+ * @returns `dev` | `aliyun` 或其它配置值
+ */
+export function getSmsProvider(): string {
+  return (process.env.SMS_PROVIDER || 'dev').trim().toLowerCase() || 'dev';
+}
+
+/**
+ * 是否已具备真实发信条件（阿里云四件套齐全）。
+ *
+ * @returns 开发通道视为就绪；阿里云须配齐密钥与模板
+ */
+export function isSmsReady(): boolean {
+  const provider = getSmsProvider();
+  if (provider === 'dev') {
+    return true;
+  }
+  if (provider === 'aliyun') {
+    return Boolean(readAliyunConfig());
+  }
+  return false;
+}
+
+/**
+ * 启动时校验短信配置。开发通道直接通过；生产通道缺项则抛错，避免静默打日志码。
+ *
+ * @returns {void}
+ * @throws {Error} 未知通道或阿里云配置不完整
+ */
+export function assertSmsConfig(): void {
+  const provider = getSmsProvider();
+  if (provider === 'dev') {
+    return;
+  }
+  if (provider === 'aliyun') {
+    if (!readAliyunConfig()) {
+      throw new Error(
+        '真实短信未就绪：请在 services/cloud/.env 配置 SMS_PROVIDER=aliyun，以及 SMS_ACCESS_KEY_ID、SMS_ACCESS_KEY_SECRET、SMS_SIGN_NAME、SMS_TEMPLATE_CODE',
+      );
+    }
+    return;
+  }
+  throw new Error(`不支持的 SMS_PROVIDER：${provider}（可选 dev / aliyun）`);
+}
+
+/**
  * 对验证码做哈希存储。
  *
  * @param code - 明文验证码
@@ -66,14 +113,62 @@ async function hitRateLimit(key: string, windowMs: number, max: number): Promise
 }
 
 /**
- * 发送短信验证码（dev 打日志；aliyun 走 HTTP OpenAPI 简版）。
+ * 阿里云 RPC 百分号编码（对 * 等字符的处理与 encodeURIComponent 不同）。
  *
- * @param phone - 手机号
+ * @param value - 原始字符串
+ * @returns 编码结果
+ */
+function percentEncode(value: string): string {
+  return encodeURIComponent(value)
+    .replace(/!/g, '%21')
+    .replace(/'/g, '%27')
+    .replace(/\(/g, '%28')
+    .replace(/\)/g, '%29')
+    .replace(/\*/g, '%2A');
+}
+
+type AliyunSmsConfig = {
+  accessKeyId: string;
+  accessKeySecret: string;
+  signName: string;
+  templateCode: string;
+  templateParamKey: string;
+  regionId: string;
+};
+
+/**
+ * 读取阿里云短信配置；缺任一项则返回 null。
+ *
+ * @returns 配置或 null
+ */
+function readAliyunConfig(): AliyunSmsConfig | null {
+  const accessKeyId = process.env.SMS_ACCESS_KEY_ID?.trim() || '';
+  const accessKeySecret = process.env.SMS_ACCESS_KEY_SECRET?.trim() || '';
+  const signName = process.env.SMS_SIGN_NAME?.trim() || '';
+  const templateCode = process.env.SMS_TEMPLATE_CODE?.trim() || '';
+  if (!accessKeyId || !accessKeySecret || !signName || !templateCode) {
+    return null;
+  }
+  return {
+    accessKeyId,
+    accessKeySecret,
+    signName,
+    templateCode,
+    templateParamKey: process.env.SMS_TEMPLATE_PARAM?.trim() || 'code',
+    regionId: process.env.SMS_REGION_ID?.trim() || 'cn-hangzhou',
+  };
+}
+
+/**
+ * 发送短信验证码（dev 仅打日志；aliyun 调用 Dysmsapi SendSms）。
+ *
+ * @param phone - 11 位手机号
  * @param code - 验证码
  * @returns {Promise<void>}
+ * @throws {Error} 通道不支持或运营商接口失败
  */
 export async function deliverSmsCode(phone: string, code: string): Promise<void> {
-  const provider = (process.env.SMS_PROVIDER || 'dev').toLowerCase();
+  const provider = getSmsProvider();
   if (provider === 'dev') {
     console.log(`[cloud-sms-dev] phone=${phone} code=${code}`);
     return;
@@ -86,66 +181,77 @@ export async function deliverSmsCode(phone: string, code: string): Promise<void>
 }
 
 /**
- * 调用阿里云短信（需配置 AccessKey / 签名 / 模板；模板变量默认 code）。
+ * 调用阿里云短信 SendSms（RPC POST + HMAC-SHA1）。
  *
- * @param phone - 手机号
+ * @param phone - 11 位手机号
  * @param code - 验证码
  * @returns {Promise<void>}
+ * @throws {Error} 配置缺失或接口返回非 OK
  */
 async function sendAliyunSms(phone: string, code: string): Promise<void> {
-  const accessKeyId = process.env.SMS_ACCESS_KEY_ID?.trim();
-  const accessKeySecret = process.env.SMS_ACCESS_KEY_SECRET?.trim();
-  const signName = process.env.SMS_SIGN_NAME?.trim();
-  const templateCode = process.env.SMS_TEMPLATE_CODE?.trim();
-  if (!accessKeyId || !accessKeySecret || !signName || !templateCode) {
+  const config = readAliyunConfig();
+  if (!config) {
     throw new Error('阿里云短信未配置完整：SMS_ACCESS_KEY_ID/SECRET、SMS_SIGN_NAME、SMS_TEMPLATE_CODE');
   }
 
   const params: Record<string, string> = {
-    AccessKeyId: accessKeyId,
+    AccessKeyId: config.accessKeyId,
     Action: 'SendSms',
     Format: 'JSON',
     PhoneNumbers: phone,
-    RegionId: process.env.SMS_REGION_ID?.trim() || 'cn-hangzhou',
-    SignName: signName,
+    RegionId: config.regionId,
+    SignName: config.signName,
     SignatureMethod: 'HMAC-SHA1',
     SignatureNonce: crypto.randomUUID(),
     SignatureVersion: '1.0',
-    TemplateCode: templateCode,
-    TemplateParam: JSON.stringify({ code }),
+    TemplateCode: config.templateCode,
+    TemplateParam: JSON.stringify({ [config.templateParamKey]: code }),
     Timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     Version: '2017-05-25',
   };
 
-  const sorted = Object.keys(params)
+  const canonical = Object.keys(params)
     .sort()
-    .map((key) => `${encodeURIComponent(key)}=${encodeURIComponent(params[key])}`)
+    .map((key) => `${percentEncode(key)}=${percentEncode(params[key])}`)
     .join('&');
-  const stringToSign = `GET&${encodeURIComponent('/')}&${encodeURIComponent(sorted)}`;
+  const stringToSign = `POST&${percentEncode('/')}&${percentEncode(canonical)}`;
   const signature = crypto
-    .createHmac('sha1', `${accessKeySecret}&`)
-    .update(stringToSign)
+    .createHmac('sha1', `${config.accessKeySecret}&`)
+    .update(stringToSign, 'utf8')
     .digest('base64');
-  const url = `https://dysmsapi.aliyuncs.com/?${sorted}&Signature=${encodeURIComponent(signature)}`;
-  const response = await fetch(url);
-  const raw = await response.text();
-  let body: { Code?: string; Message?: string } = {};
+  const body = `${canonical}&Signature=${percentEncode(signature)}`;
+
+  let response: Response;
   try {
-    body = JSON.parse(raw) as typeof body;
+    response = await fetch('https://dysmsapi.aliyuncs.com/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`阿里云短信网络失败：${message}`);
+  }
+
+  const raw = await response.text();
+  let parsed: { Code?: string; Message?: string } = {};
+  try {
+    parsed = JSON.parse(raw) as typeof parsed;
   } catch {
     throw new Error(`阿里云短信返回非 JSON：${raw.slice(0, 200)}`);
   }
-  if (body.Code !== 'OK') {
-    throw new Error(`阿里云短信失败：${body.Message || body.Code || raw.slice(0, 200)}`);
+  if (parsed.Code !== 'OK') {
+    throw new Error(`短信发送失败：${parsed.Message || parsed.Code || '请稍后重试'}`);
   }
 }
 
 /**
- * 写入并发送验证码。
+ * 写入并发送验证码。真实通道使用随机 6 位码，不会回落到 SMS_DEV_CODE。
  *
  * @param phone - 手机号
  * @param ip - 客户端 IP
  * @returns {Promise<void>}
+ * @throws {Error} 限流或发信失败
  */
 export async function issueSmsCode(phone: string, ip: string): Promise<void> {
   if (!(await hitRateLimit(`phone:${phone}`, PHONE_WINDOW_MS, PHONE_MAX_PER_WINDOW))) {
@@ -155,11 +261,10 @@ export async function issueSmsCode(phone: string, ip: string): Promise<void> {
     throw new Error('当前网络发送次数过多，请稍后再试');
   }
 
+  const provider = getSmsProvider();
+  const devFixed = process.env.SMS_DEV_CODE?.trim();
   const code =
-    process.env.SMS_DEV_CODE?.trim() &&
-    (process.env.SMS_PROVIDER || 'dev').toLowerCase() === 'dev'
-      ? process.env.SMS_DEV_CODE.trim()
-      : generateSmsCode();
+    provider === 'dev' && devFixed ? devFixed : generateSmsCode();
 
   const now = new Date();
   const expires = new Date(now.getTime() + CODE_TTL_MS).toISOString();
@@ -174,7 +279,12 @@ export async function issueSmsCode(phone: string, ip: string): Promise<void> {
     [phone, hashSmsCode(code), expires, now.toISOString()],
   );
 
-  await deliverSmsCode(phone, code);
+  try {
+    await deliverSmsCode(phone, code);
+  } catch (error) {
+    await query('DELETE FROM sms_codes WHERE phone = $1', [phone]);
+    throw error;
+  }
 }
 
 /**
@@ -198,7 +308,10 @@ export async function verifySmsCode(phone: string, code: string): Promise<boolea
     await query('DELETE FROM sms_codes WHERE phone = $1', [phone]);
     return false;
   }
-  const ok = row.code_hash === hashSmsCode(code.trim());
+  const expected = Buffer.from(row.code_hash, 'utf8');
+  const actual = Buffer.from(hashSmsCode(code.trim()), 'utf8');
+  const ok =
+    expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
   if (ok) {
     await query('DELETE FROM sms_codes WHERE phone = $1', [phone]);
   }

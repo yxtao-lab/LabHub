@@ -25,7 +25,7 @@ import { generateAnalysisMarkdown } from './deepseek.js';
 import { loadRelayEnvFile } from './load-env.js';
 import { normalizePhone } from './phone.js';
 import { consumeAiQuota, getRemainingAiQuota } from './quota.js';
-import { issueSmsCode, verifySmsCode } from './sms.js';
+import { assertSmsConfig, getSmsProvider, isSmsReady, issueSmsCode, verifySmsCode } from './sms.js';
 
 loadRelayEnvFile();
 
@@ -80,7 +80,8 @@ app.get('/health', (_req, res) => {
     ok: true,
     name: 'labhub-cloud',
     hasDeepSeekKey: Boolean((process.env.DEEPSEEK_API_KEY ?? '').trim()),
-    smsProvider: process.env.SMS_PROVIDER || 'dev',
+    smsProvider: getSmsProvider(),
+    smsReady: isSmsReady(),
     database: 'postgresql',
   });
 });
@@ -350,9 +351,14 @@ app.post('/v1/analyze', requireAuth, async (req: AuthedRequest, res) => {
  * @returns {Promise<void>}
  */
 async function main(): Promise<void> {
+  assertSmsConfig();
   await initDb();
   app.listen(port, () => {
     console.log(`[labhub-cloud] http://127.0.0.1:${port}`);
+    const smsProvider = getSmsProvider();
+    console.log(
+      `[labhub-cloud] 短信通道：${smsProvider}${smsProvider === 'aliyun' ? '（真实短信）' : '（开发模式，验证码打日志）'}`,
+    );
     console.log('[labhub-cloud] DeepSeek / 短信密钥仅驻留本进程；勿提交 .env');
     void (async () => {
       try {

@@ -975,6 +975,7 @@ async function sendSmsCode(): Promise<void> {
       method: 'POST',
       body: JSON.stringify({ phone: authPhone.value }),
     });
+    showToast('验证码已发送，请查收短信');
     smsCooldown.value = 60;
     if (smsTimer !== undefined) {
       window.clearInterval(smsTimer);

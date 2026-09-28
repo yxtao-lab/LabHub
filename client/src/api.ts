@@ -11,6 +11,8 @@ export type StartProfile = {
   name: string;
   command: string;
   openUrl?: string | null;
+  /** 可选运行端口；启动时注入并改写探测地址 */
+  runPort?: number | null;
   cwd?: string | null;
   phase?: string | null;
   description?: string;

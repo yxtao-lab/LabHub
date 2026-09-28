@@ -223,13 +223,20 @@ projectsRouter.delete('/:id', async (req, res, next) => {
 });
 
 /**
- * POST /api/projects/:id/start — body.profileId 可选
+ * POST /api/projects/:id/start — body.profileId / body.port 可选
  */
 projectsRouter.post('/:id/start', async (req, res, next) => {
   try {
     const profileId =
       typeof req.body?.profileId === 'string' ? req.body.profileId : null;
-    const project = await startProject(req.params.id, profileId);
+    const rawPort = req.body?.port;
+    const port =
+      rawPort === undefined || rawPort === null || rawPort === ''
+        ? undefined
+        : Number(rawPort);
+    const project = await startProject(req.params.id, profileId, {
+      port: port === undefined ? undefined : port,
+    });
     res.json({ project });
   } catch (error) {
     next(error);

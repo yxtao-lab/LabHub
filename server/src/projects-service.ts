@@ -27,6 +27,7 @@ import { extractRuntimeUrls, mergeDetectedAndConfiguredUrls } from './log-urls.j
 import { openBrowserPreferDetected } from './open-browser.js';
 import { processManager } from './process-manager.js';
 import { appendRepoLog, clearRepoLogs, getRepoLogs } from './repo-log.js';
+import { applyRunPort, normalizeRunPort, syncProfilePortFields } from './run-port.js';
 import {
   DEFAULT_PROFILE_ID,
   MAX_CUSTOM_COMMAND_LENGTH,
@@ -98,6 +99,13 @@ const startProfileSchema = z.object({
   name: z.string().min(1),
   command: z.string().min(1),
   openUrl: z.string().url().nullable().optional(),
+  runPort: z
+    .number()
+    .int()
+    .min(1)
+    .max(65535)
+    .nullable()
+    .optional(),
   cwd: z.string().nullable().optional(),
   phase: z.string().nullable().optional(),
   description: z.string().optional(),
@@ -641,9 +649,29 @@ export async function updateProject(
   if (!current) {
     throw new Error(`项目不存在：${id}`);
   }
+  let startProfiles = patch.startProfiles;
+  if (startProfiles) {
+    startProfiles = startProfiles.map((item) => {
+      const port =
+        item.runPort === undefined
+          ? undefined
+          : normalizeRunPort(item.runPort);
+      if (item.runPort !== undefined && item.runPort !== null && port === null) {
+        throw new Error(`端口无效：${String(item.runPort)}（须为 1–65535 的整数）`);
+      }
+      if (port === undefined) {
+        return item;
+      }
+      return {
+        ...item,
+        ...syncProfilePortFields(item, port),
+      };
+    });
+  }
   const next = normalizeProjectRecord({
     ...current,
     ...patch,
+    ...(startProfiles ? { startProfiles } : {}),
     tags: patch.tags !== undefined ? normalizeTags(patch.tags) : normalizeTags(current.tags),
     categoryId:
       patch.categoryId !== undefined
@@ -728,12 +756,14 @@ export async function deleteProject(id: string, deleteFiles = false): Promise<vo
  *
  * @param id - 项目 id
  * @param profileId - 启动模式 id
+ * @param options.port - 本次启动临时端口（优先于模式内 runPort）
  * @returns 运行态视图
- * @throws {Error} 目录缺失等
+ * @throws {Error} 目录缺失、端口非法等
  */
 export async function startProject(
   id: string,
   profileId?: string | null,
+  options: { port?: number | null } = {},
 ): Promise<ProjectView> {
   const current = findProject(id);
   if (!current) {
@@ -754,11 +784,32 @@ export async function startProject(
   );
   const cwd = resolveProfileCwd(absolutePath, profile);
   const key = runtimeKey(id, profile.id);
-  const probeUrls = [profile.openUrl].filter((item): item is string => Boolean(item));
-  await processManager.start(key, cwd, profile.command, probeUrls);
+  const overridePort =
+    options.port === undefined ? undefined : normalizeRunPort(options.port);
+  if (options.port !== undefined && options.port !== null && overridePort === null) {
+    throw new Error(`端口无效：${String(options.port)}（须为 1–65535 的整数）`);
+  }
+  const applied = applyRunPort(profile, overridePort);
+  const startEnv = {
+    ...applied.env,
+    // LabHub 负责打开登记 openUrl（管理端）；子项目仍可打开 PC / 小程序
+    ...(applied.openUrl
+      ? {
+          LABHUB_SKIP_OPEN_TAGS: 'web',
+          DOUXING_OPEN_TARGETS: 'pc,mp-weixin',
+        }
+      : {}),
+  };
+  await processManager.start(
+    key,
+    cwd,
+    applied.command,
+    applied.probeUrls,
+    startEnv,
+  );
   void openBrowserPreferDetected({
     getDetectedUrls: () => extractRuntimeUrls(processManager.getLogs(key, 200)),
-    fallbackUrl: profile.openUrl,
+    fallbackUrl: applied.openUrl,
   }).catch(() => {
     // 打开失败不阻断启动
   });

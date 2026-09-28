@@ -306,6 +306,10 @@ function mergeStartMeta(
     return {
       ...item,
       openUrl: old.openUrl ?? item.openUrl ?? null,
+      runPort:
+        typeof old.runPort === 'number' && Number.isFinite(old.runPort)
+          ? old.runPort
+          : (item.runPort ?? null),
       cwd: old.cwd ?? item.cwd ?? null,
       phase: old.phase ?? item.phase ?? null,
       description: old.description || item.description || '',

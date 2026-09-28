@@ -143,6 +143,10 @@ export function resolveStartProfiles(record: ProjectRecord): StartProfile[] {
       name: String(item.name || item.id || '默认'),
       command: String(item.command || record.startCommand || 'npm run dev'),
       openUrl: item.openUrl ?? null,
+      runPort:
+        typeof item.runPort === 'number' && Number.isFinite(item.runPort)
+          ? item.runPort
+          : null,
       cwd: item.cwd ?? null,
       phase: item.phase ?? null,
       description: item.description ?? '',
@@ -154,6 +158,7 @@ export function resolveStartProfiles(record: ProjectRecord): StartProfile[] {
       name: '默认',
       command: record.startCommand || 'npm run dev',
       openUrl: record.openUrl ?? null,
+      runPort: null,
       cwd: null,
       phase: record.currentPhase ?? null,
       description: '',

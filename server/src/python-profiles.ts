@@ -507,7 +507,7 @@ export function inferProfilesFromPython(
     });
   }
 
-  // 合并旧 openUrl / cwd
+  // 合并旧 openUrl / cwd / runPort
   const prevStarts = new Map(
     (options.previous?.startProfiles ?? []).map((item) => [item.id, item]),
   );
@@ -517,6 +517,10 @@ export function inferProfilesFromPython(
       continue;
     }
     item.openUrl = old.openUrl ?? item.openUrl ?? null;
+    item.runPort =
+      typeof old.runPort === 'number' && Number.isFinite(old.runPort)
+        ? old.runPort
+        : (item.runPort ?? null);
     item.cwd = old.cwd ?? item.cwd ?? null;
     item.phase = old.phase ?? item.phase ?? null;
     item.description = old.description || item.description || '';

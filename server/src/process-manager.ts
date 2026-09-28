@@ -91,6 +91,7 @@ export class ProcessManager {
    * @param cwd - 工作目录
    * @param command - shell 命令行（如 npm run dev）
    * @param probeUrls - 启动前用于检测端口占用
+   * @param envOverrides - 额外环境变量（如 PORT），会覆盖同名键
    * @returns 启动后的运行态
    * @throws {Error} 已在运行、端口占用或启动失败时抛出
    */
@@ -99,6 +100,7 @@ export class ProcessManager {
     cwd: string,
     command: string,
     probeUrls: string[] = [],
+    envOverrides: Record<string, string> = {},
   ): Promise<RuntimeState> {
     const current = await this.getRuntime(projectId, probeUrls);
     if (current.status === 'running' || current.status === 'starting') {
@@ -108,18 +110,24 @@ export class ProcessManager {
     const listeningUrl = await findListeningUrl(probeUrls);
     if (listeningUrl) {
       throw new Error(
-        `端口已被占用：${listeningUrl}。LabHub 未托管该进程；请先结束占用进程后再启动`,
+        `端口已被占用：${listeningUrl}。LabHub 未托管该进程；请先结束占用进程后再启动，或更换启动端口`,
       );
     }
 
     const entry = this.ensure(projectId);
     entry.ownedByHub = true;
     this.appendLog(entry, 'system', `启动：${command}`);
+    if (Object.keys(envOverrides).length > 0) {
+      const preview = Object.entries(envOverrides)
+        .map(([key, value]) => `${key}=${value}`)
+        .join(' ');
+      this.appendLog(entry, 'system', `环境变量：${preview}`);
+    }
     this.setStatus(entry, 'starting', { error: null, exitCode: null, exitedAt: null });
 
     const child = spawn(command, {
       cwd,
-      env: process.env,
+      env: { ...process.env, ...envOverrides },
       shell: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,

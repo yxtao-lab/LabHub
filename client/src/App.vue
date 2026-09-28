@@ -213,6 +213,8 @@ const billingBusy = ref(false);
 const billingMessage = ref<string | null>(null);
 const toastMessage = ref<string | null>(null);
 let toastTimer: number | undefined;
+/** 各启动模式端口草稿：key = `${projectId}:${profileId}` */
+const profilePortDrafts = ref<Record<string, string>>({});
 /** 开发环境预填的 Cloud 测试账号（与 services/cloud 启动种子一致） */
 const DEV_TEST_PHONE = '13800138000';
 const DEV_TEST_PASSWORD = 'labhub123';
@@ -1841,13 +1843,139 @@ async function toggleProfile(profileId: string, running: boolean): Promise<void>
   }
   const id = selected.value.id;
   logProfileId.value = profileId;
+  let port: number | null | undefined;
+  if (!running) {
+    try {
+      port = parseProfilePortDraft(id, profileId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      showToast(message);
+      return;
+    }
+  }
   await runAction(async () => {
     await api(`/api/projects/${id}/${running ? 'stop' : 'start'}`, {
       method: 'POST',
-      body: JSON.stringify({ profileId }),
+      body: JSON.stringify({
+        profileId,
+        ...(port != null ? { port } : {}),
+      }),
     });
   });
   void refreshLogs(id);
+}
+
+/**
+ * 读取启动模式端口输入框草稿。
+ *
+ * @param projectId - 项目 id
+ * @param profileId - 模式 id
+ * @returns 草稿字符串
+ */
+function profilePortDraftKey(projectId: string, profileId: string): string {
+  return `${projectId}:${profileId}`;
+}
+
+/**
+ * 展示用的端口输入值：优先草稿，否则用已保存的 runPort。
+ *
+ * @param profile - 启动模式
+ * @returns 输入框字符串
+ */
+function getProfilePortInput(profile: { id: string; runPort?: number | null }): string {
+  const projectId = selected.value?.id;
+  if (!projectId) {
+    return '';
+  }
+  const key = profilePortDraftKey(projectId, profile.id);
+  if (Object.prototype.hasOwnProperty.call(profilePortDrafts.value, key)) {
+    return profilePortDrafts.value[key] ?? '';
+  }
+  return profile.runPort != null ? String(profile.runPort) : '';
+}
+
+/**
+ * 更新端口草稿。
+ *
+ * @param profileId - 模式 id
+ * @param value - 输入值
+ * @returns {void}
+ */
+function setProfilePortInput(profileId: string, value: string): void {
+  const projectId = selected.value?.id;
+  if (!projectId) {
+    return;
+  }
+  profilePortDrafts.value = {
+    ...profilePortDrafts.value,
+    [profilePortDraftKey(projectId, profileId)]: value,
+  };
+}
+
+/**
+ * 解析端口草稿；空串表示不覆盖。
+ *
+ * @param projectId - 项目 id
+ * @param profileId - 模式 id
+ * @returns 端口数字或 null（未填）；非法时抛错由调用方处理
+ */
+function parseProfilePortDraft(projectId: string, profileId: string): number | null {
+  const key = profilePortDraftKey(projectId, profileId);
+  const raw = Object.prototype.hasOwnProperty.call(profilePortDrafts.value, key)
+    ? (profilePortDrafts.value[key] ?? '').trim()
+    : '';
+  if (!raw) {
+    const profile = selected.value?.startProfiles?.find((item) => item.id === profileId);
+    return profile?.runPort ?? null;
+  }
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`端口无效：${raw}（须为 1–65535）`);
+  }
+  return port;
+}
+
+/**
+ * 保存启动模式端口到清单（并同步 openUrl）。
+ *
+ * @param profileId - 模式 id
+ * @returns {Promise<void>}
+ */
+async function saveProfileRunPort(profileId: string): Promise<void> {
+  if (!selected.value) {
+    return;
+  }
+  const project = selected.value;
+  let port: number | null;
+  try {
+    const key = profilePortDraftKey(project.id, profileId);
+    const raw = (profilePortDrafts.value[key] ?? getProfilePortInput(
+      project.startProfiles.find((item) => item.id === profileId) || { id: profileId },
+    )).trim();
+    if (!raw) {
+      port = null;
+    } else {
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+        showToast(`端口无效：${raw}`);
+        return;
+      }
+      port = parsed;
+    }
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : String(err));
+    return;
+  }
+  await runAction(async () => {
+    const startProfiles = (project.startProfiles || []).map((item) =>
+      item.id === profileId ? { ...item, runPort: port } : item,
+    );
+    await api(`/api/projects/${project.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ startProfiles }),
+    });
+    showToast(port == null ? '已清除端口配置' : `已保存端口 ${port}`);
+  });
 }
 
 /**
@@ -4317,7 +4445,34 @@ watch(detailTab, (tab) => {
                       <p class="mono mt-1 break-all text-[11px] text-[var(--muted)]">
                         {{ item.profile.command }}
                         <span v-if="item.profile.cwd"> · cwd {{ item.profile.cwd }}</span>
+                        <span v-if="item.profile.runPort"> · 端口 {{ item.profile.runPort }}</span>
                       </p>
+                      <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
+                        <label class="flex items-center gap-1 text-[11px] text-[var(--muted)]">
+                          端口
+                          <input
+                            type="number"
+                            min="1"
+                            max="65535"
+                            placeholder="默认"
+                            class="w-20 rounded border border-[var(--line)] bg-[#0b1016] px-1.5 py-0.5 mono text-[11px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
+                            :value="getProfilePortInput(item.profile)"
+                            :disabled="busy || item.runtime.status === 'running' || item.runtime.status === 'starting'"
+                            @input="setProfilePortInput(item.profile.id, ($event.target as HTMLInputElement).value)"
+                          >
+                        </label>
+                        <button
+                          type="button"
+                          class="rounded border px-1.5 py-0.5 text-[10px] font-medium disabled:opacity-40"
+                          :class="toneClass()"
+                          :disabled="busy"
+                          title="写入清单，下次启动默认使用"
+                          @click="saveProfileRunPort(item.profile.id)"
+                        >
+                          保存端口
+                        </button>
+                        <span class="text-[10px] text-[var(--muted)]">空=不覆盖；启动时注入 PORT</span>
+                      </div>
                       <div
                         v-if="profileDetectedUrls(item).length"
                         class="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1"

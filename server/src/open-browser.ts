@@ -57,8 +57,8 @@ export async function openBrowserWhenReady(
 }
 
 /**
- * 优先打开日志探测到的真实地址（适配 Vite 等自动换端口）；
- * 若超时仍无探测结果，再回退登记 openUrl（若有）。
+ * 优先打开登记的 openUrl；若未配置再回退日志探测地址。
+ * 多端 monorepo 日志里常出现多个 Local URL，盲目跟探测会打开错误端。
  *
  * @param options.getDetectedUrls - 拉取当前探测 URL
  * @param options.fallbackUrl - 登记地址
@@ -75,27 +75,31 @@ export async function openBrowserPreferDetected(options: {
   let lastPrimary: string | null = null;
 
   while (Date.now() < deadline) {
+    if (fallbackUrl) {
+      const readyFallback = await findListeningUrl([fallbackUrl]);
+      if (readyFallback) {
+        await openBrowser(readyFallback);
+        return;
+      }
+    }
+
     const detected = getDetectedUrls();
     const primary = pickPrimaryRuntimeUrl(detected);
     if (primary) {
       lastPrimary = primary;
-      const candidates = [primary, fallbackUrl].filter((item): item is string => Boolean(item));
-      const ready = await findListeningUrl(candidates);
-      if (ready) {
-        await openBrowser(ready);
-        return;
-      }
-    } else if (fallbackUrl) {
-      const ready = await findListeningUrl([fallbackUrl]);
-      if (ready) {
-        await openBrowser(ready);
-        return;
+      // 已配置 openUrl 时，探测仅作后备，避免误开其它端
+      if (!fallbackUrl) {
+        const ready = await findListeningUrl([primary]);
+        if (ready) {
+          await openBrowser(ready);
+          return;
+        }
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
-  const finalUrl = lastPrimary || pickPrimaryRuntimeUrl(getDetectedUrls()) || fallbackUrl;
+  const finalUrl = fallbackUrl || lastPrimary || pickPrimaryRuntimeUrl(getDetectedUrls());
   if (finalUrl) {
     await openBrowser(finalUrl);
   }

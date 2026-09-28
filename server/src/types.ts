@@ -10,6 +10,11 @@ export type StartProfile = {
   command: string;
   /** 该模式的主访问地址（端口探测候选） */
   openUrl?: string | null;
+  /**
+   * 可选运行端口：启动时注入 PORT/VITE_PORT，并尽量改写命令与 openUrl。
+   * null / 缺省表示不覆盖，沿用项目自身默认端口。
+   */
+  runPort?: number | null;
   /** 相对项目根的工作目录，空则用项目根 */
   cwd?: string | null;
   /** 归属分期，如 P0 / P1 / P2 */

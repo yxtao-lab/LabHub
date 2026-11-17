@@ -16,7 +16,7 @@ FreeLLMAPI 只是被管理的项目之一，不是中枢本身。
 ```text
 labhub/
   server/                 ← 本机管理 API :8790
-  client/                 ← 控制台 UI :5177
+  client/                 ← 控制台 UI :8777（开发）
   services/cloud/         ← LabHub Cloud（维护者部署：账号/清单/AI）
   config/public.json      ← 可公开的 cloudUrl、labhubRepoUrl（非密钥）
   projects/               ← 托管克隆（gitignore）
@@ -38,9 +38,9 @@ pnpm dev
 
 1. 补全 `services/cloud/.env`（若缺失，从 `.env.example` 复制）
 2. `docker compose` 拉起 Postgres
-3. 并发启动 **server** `:8790`、**client** `:5177`、**cloud** `:8780`，并打开 **Electron** 窗口
+3. 并发启动 **server** `:8790`、**client** `:8777`、**cloud** `:8780`，并打开 **Electron** 窗口
 
-开发时控制台在 Electron 里打开（页面由 Vite `:5177` 提供，接口仍是 `:8790`）。也可以直接用浏览器打开 http://127.0.0.1:5177 。
+开发时控制台在 Electron 里打开（页面由 Vite `:8777` 提供，接口仍是 `:8790`）。也可以直接用浏览器打开 http://127.0.0.1:8777 。子项目请勿占用 `8777`（可用环境变量 `LABHUB_CLIENT_DEV_PORT` 覆盖）。
 
 - 开发预置账号：`13800138000` / `labhub123`（`SMS_PROVIDER=dev`）
 - 注册：手机号 + 密码 + 短信验证码（邀请码可选）

@@ -70,7 +70,8 @@ function onServerReady() {
     void openBrowser(consoleUrl);
     return;
   }
-  console.log('[labhub] 开发时控制台请另开 Vite（默认 :5177）');
+  const clientDevPort = Number(process.env.LABHUB_CLIENT_DEV_PORT) || 8777;
+  console.log(`[labhub] 开发时控制台请另开 Vite（默认 :${clientDevPort}）`);
 }
 
 if (packaged) {

@@ -9,7 +9,8 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const desktopDir = path.dirname(fileURLToPath(import.meta.url));
-const devConsoleUrl = 'http://127.0.0.1:5177/';
+const clientDevPort = Number(process.env.LABHUB_CLIENT_DEV_PORT) || 8777;
+const devConsoleUrl = `http://127.0.0.1:${clientDevPort}/`;
 const apiPort = Number(process.env.PORT ?? 8790);
 const apiOrigin = `http://127.0.0.1:${apiPort}`;
 
